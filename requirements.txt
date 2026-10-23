@@ -8,3 +8,4 @@ scipy
 beautifulsoup4
 lxml
 tzdata
+yfinance
