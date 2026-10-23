@@ -26,7 +26,7 @@ import tefas_filtre  # noqa: E402
 import tefas_ek as TE  # noqa: E402
 import tefas_portfoyum  # noqa: E402
 import tefas_bist  # noqa: E402
-
+import tefas_panel  # noqa: E402
 # ── Sayfa ayarı ─────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="TEFAS Fon Analiz",
@@ -803,7 +803,12 @@ if sayfa == "🏠 Ana Sayfa":
 """,
         unsafe_allow_html=True,
     )
+unsafe_allow_html=True,
+    )
 
+    tefas_panel.render_ana_panel()      # ← eklenecek satır
+
+    sepet_n = len(st.session_state.get("portfoy_sepet") or [])
     sepet_n = len(st.session_state.get("portfoy_sepet") or [])
     sa = st.session_state.get("sepet_analiz") or {}
     c1, c2, c3, c4, c5 = st.columns(5)
