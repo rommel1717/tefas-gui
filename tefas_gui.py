@@ -74,6 +74,26 @@ st.markdown(
     background: #1e293b; border: 1px solid #334155; border-radius: 10px;
     padding: 10px 12px; margin-top: 8px;
   }
+  .disclaimer {
+    margin-top: 2rem; padding: 12px 16px; border-radius: 10px;
+    background: #0f172a; border: 1px solid #334155; color: #94a3b8;
+    font-size: 0.8rem; line-height: 1.45;
+  }
+  div[data-testid="stSidebar"] .stButton > button {
+    width: 100%; border-radius: 8px;
+  }
+  /* metric kartları */
+  [data-testid="stMetric"] {
+    background: #1e293b22; border: 1px solid #33415555;
+    border-radius: 10px; padding: 8px 10px;
+  }
+  /* tablolar */
+  .stDataFrame th { white-space: nowrap; }
+  /* sepet rozeti */
+  .sepet-badge {
+    display:inline-block; background:#1d4ed8; color:#fff;
+    border-radius:999px; padding:2px 8px; font-size:0.75rem; font-weight:700;
+  }
 </style>
 """,
     unsafe_allow_html=True,
@@ -99,6 +119,9 @@ def _init_state():
         "hisse_liste": "THYAO,GARAN,ASELS",
         "portfoy_sepet": [],
         "sepet_analiz": None,
+        "sayfa": "🏠 Ana Sayfa",
+        "sepet_auto_analiz": False,
+        "app_version": "2.1.0",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -109,29 +132,41 @@ _init_state()
 
 
 def get_analiz() -> core.FonAnaliz:
-    a = st.session_state.analiz
-    tip = st.session_state.fon_tipi
-    cfg = st.session_state.cfg
-    if a is None or a.api.fon_tipi != tip:
+    """FonAnaliz motorunu session'da tutar; tip/cfg değişince yeniler."""
+    a = st.session_state.get("analiz")
+    tip = st.session_state.get("fon_tipi", "YAT")
+    cfg = st.session_state.get("cfg") or core.load_config()
+    need_new = a is None
+    if not need_new:
+        try:
+            need_new = getattr(a.api, "fon_tipi", None) != tip
+        except Exception:
+            need_new = True
+    if need_new:
         st.session_state.analiz = core.FonAnaliz(fon_tipi=tip, cfg=cfg)
     else:
-        st.session_state.analiz.cfg = cfg
-        st.session_state.analiz.rf = float(cfg.get("risk_free", 0.40))
+        try:
+            st.session_state.analiz.cfg = cfg
+            st.session_state.analiz.rf = float(cfg.get("risk_free", 0.40))
+        except Exception:
+            st.session_state.analiz = core.FonAnaliz(fon_tipi=tip, cfg=cfg)
     return st.session_state.analiz
 
 
 
 def sepet_ekle(kodlar, ad_map=None, kaynak="manuel"):
-    """Fon kodlarını portföy sepetine ekler (tekrarsız)."""
+    """Fon kodlarını portföy sepetine ekler (tekrarsız, normalize)."""
     ad_map = ad_map or {}
     sepet = list(st.session_state.get("portfoy_sepet") or [])
     mevcut = {str(x.get("kod")).upper() for x in sepet}
     eklendi = 0
     for k in kodlar:
-        k = str(k).strip().upper()
+        k = str(k).strip().upper().replace(" ", "")
         if not k or k in mevcut:
             continue
-        sepet.append({"kod": k, "ad": ad_map.get(k, k), "kaynak": kaynak})
+        # ad_map anahtarları da normalize
+        ad = ad_map.get(k) or ad_map.get(str(k)) or k
+        sepet.append({"kod": k, "ad": ad, "kaynak": kaynak})
         mevcut.add(k)
         eklendi += 1
     st.session_state.portfoy_sepet = sepet
@@ -508,6 +543,290 @@ def fmt_num(v, digits=1, suffix=""):
         return "—"
 
 
+
+# ── Bilanço bildirimleri (FON / HİSSE ayrı) ─────────────────────────────────
+def _bilanco_state_path() -> Path:
+    try:
+        return Path(core.CACHE_DIR) / "bilanco_bildirim_state.json"
+    except Exception:
+        return ROOT / "bilanco_bildirim_state.json"
+
+
+def _load_bilanco_state() -> dict:
+    p = _bilanco_state_path()
+    if not p.exists():
+        return {"fon": {}, "hisse": {}, "hisse_metrik_onceki": {}, "fon_metrik_onceki": {}}
+    try:
+        import json
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {"fon": {}, "hisse": {}, "hisse_metrik_onceki": {}, "fon_metrik_onceki": {}}
+
+
+def _save_bilanco_state(state: dict) -> None:
+    try:
+        import json
+        p = _bilanco_state_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(state, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _beklenen_bilanco_donemi(ref: datetime | None = None) -> dict:
+    """
+    BIST şirketleri için yaklaşık son tamamlanmış çeyrek.
+    KAP takvimi: Q1→Mayıs, Q2→Ağustos, Q3→Kasım, Yıllık→Mart civarı.
+    Fon tarafında TEFAS günlük NAV; 'dönem' bilgi amaçlı aynı takvim kullanılır.
+    """
+    ref = ref or datetime.now()
+    y, m = ref.year, ref.month
+    # Raporlama gecikmesi ~1.5–2 ay
+    if m <= 2:
+        return {"yil": y - 1, "donem": 9, "etiket": f"{y-1}/Q3", "tur": "ara"}
+    if m <= 5:
+        return {"yil": y - 1, "donem": 12, "etiket": f"{y-1}/Yıllık", "tur": "yillik"}
+    if m <= 8:
+        return {"yil": y, "donem": 3, "etiket": f"{y}/Q1", "tur": "ara"}
+    if m <= 11:
+        return {"yil": y, "donem": 6, "etiket": f"{y}/Q2", "tur": "ara"}
+    return {"yil": y, "donem": 9, "etiket": f"{y}/Q3", "tur": "ara"}
+
+
+def _onceki_donem(yil: int, donem: int) -> tuple[int, int]:
+    """Önceki çeyrek (3,6,9,12)."""
+    order = [3, 6, 9, 12]
+    if donem not in order:
+        donem = 12
+    i = order.index(donem)
+    if i == 0:
+        return yil - 1, 12
+    return yil, order[i - 1]
+
+
+def bilanco_bildirimleri(probe: bool = False) -> dict:
+    """
+    FON ve HİSSE bilanço/dönem bildirimlerini ayrı üretir.
+    core.bilanco_donem_durumu varsa hisse tarafında kullanır.
+    """
+    bek = _beklenen_bilanco_donemi()
+    state = _load_bilanco_state()
+    now_s = datetime.now().isoformat(timespec="seconds")
+
+    # ── HİSSE (BIST / KAP) ────────────────────────────────────────────────
+    hisse = {
+        "kaynak": "BIST / KAP / İş Yatırım",
+        "beklenen_yil": bek["yil"],
+        "beklenen_donem": bek["donem"],
+        "beklenen_etiket": bek["etiket"],
+        "durum": "bekleniyor",
+        "mesaj": f"Beklenen dönem: {bek['etiket']}",
+        "yeni_donem": False,
+        "probe": None,
+    }
+    bil_core = {}
+    try:
+        bil_core = core.bilanco_donem_durumu(probe=probe) or {}
+    except Exception as e:
+        bil_core = {"durum": "?", "mesaj": str(e)}
+
+    if bil_core.get("yil") and bil_core.get("donem"):
+        hisse["yil"] = int(bil_core["yil"])
+        hisse["donem"] = int(bil_core["donem"])
+        hisse["etiket"] = f"{hisse['yil']}/{hisse['donem']:02d}"
+    else:
+        hisse["yil"] = bek["yil"]
+        hisse["donem"] = bek["donem"]
+        hisse["etiket"] = bek["etiket"]
+
+    hisse["durum"] = bil_core.get("durum") or hisse["durum"]
+    if bil_core.get("mesaj"):
+        hisse["mesaj"] = bil_core["mesaj"]
+    if "probe" in bil_core:
+        hisse["probe"] = bil_core.get("probe")
+
+    prev_h = state.get("hisse") or {}
+    prev_key = (prev_h.get("yil"), prev_h.get("donem"))
+    cur_key = (hisse.get("yil"), hisse.get("donem"))
+    if cur_key != prev_key and hisse.get("durum") == "geldi":
+        hisse["yeni_donem"] = True
+        hisse["onceki_etiket"] = (
+            f"{prev_h['yil']}/{prev_h['donem']:02d}" if prev_h.get("yil") else None
+        )
+        hisse["mesaj"] = (
+            f"🆕 Yeni bilanço dönemi: {hisse['etiket']}"
+            + (f" (önceki: {hisse['onceki_etiket']})" if hisse.get("onceki_etiket") else "")
+        )
+
+    # ── FON (TEFAS — bilanço değil; dönemsel getiri / profil güncelliği) ──
+    fon = {
+        "kaynak": "TEFAS",
+        "beklenen_etiket": bek["etiket"],
+        "durum": "gunluk",
+        "mesaj": "Fon fiyatları (NAV) günlük; bilanço çeyreklik tablosu hisse tarafındadır.",
+        "yeni_donem": False,
+        "yil": bek["yil"],
+        "donem": bek["donem"],
+        "etiket": bek["etiket"],
+    }
+    # TEFAS'ta 'yeni dönem' = takvim çeyreği değişti + kullanıcıya hatırlatma
+    prev_f = state.get("fon") or {}
+    if (prev_f.get("yil"), prev_f.get("donem")) != (fon["yil"], fon["donem"]):
+        fon["yeni_donem"] = True
+        fon["durum"] = "yeni_ceyrek"
+        fon["mesaj"] = (
+            f"📅 Yeni raporlama çeyreği: {fon['etiket']} — "
+            "fon dağılım / büyüklük özetlerini tarama ile yenileyin."
+        )
+    else:
+        fon["durum"] = prev_f.get("durum") or "gunluk"
+
+    # State güncelle
+    state["hisse"] = {
+        "yil": hisse.get("yil"), "donem": hisse.get("donem"),
+        "durum": hisse.get("durum"), "son_kontrol": now_s,
+        "etiket": hisse.get("etiket"),
+    }
+    state["fon"] = {
+        "yil": fon.get("yil"), "donem": fon.get("donem"),
+        "durum": fon.get("durum"), "son_kontrol": now_s,
+        "etiket": fon.get("etiket"),
+    }
+    _save_bilanco_state(state)
+
+    return {"hisse": hisse, "fon": fon, "state": state, "core": bil_core}
+
+
+def mali_tablo_iyilesme_kontrolu(
+    sembol: str,
+    yeni_metrikler: dict,
+    *,
+    tur: str = "hisse",
+) -> list[str]:
+    """
+    Son bilanço / metrik setini önceki kayıtla karşılaştırır.
+    İyileşme varsa uyarı metinleri döner (kullanıcıya yeşil bildirim).
+    tur: 'hisse' | 'fon'
+    """
+    state = _load_bilanco_state()
+    key_store = "hisse_metrik_onceki" if tur == "hisse" else "fon_metrik_onceki"
+    onceki_map = state.get(key_store) or {}
+    kod = str(sembol).upper().replace(".IS", "")
+    onceki = onceki_map.get(kod) or {}
+    uyarilar = []
+
+    # Karşılaştırılacak alanlar: (alan, yön, etiket, eşik_abs)
+    # yön: 'yukari_iyi' | 'asagi_iyi'
+    checks = [
+        ("ROE", "yukari_iyi", "ROE", 0.5),
+        ("roa", "yukari_iyi", "ROA", 0.3),
+        ("net_kar_marjı", "yukari_iyi", "Net kâr marjı", 0.3),
+        ("F/K", "asagi_iyi", "F/K", 0.5),  # düşüş = ucuzlama (dikkatli yorum)
+        ("PD/DD", "asagi_iyi", "PD/DD", 0.05),
+        ("borç/özkaynak", "asagi_iyi", "Borç/Özkaynak", 0.05),
+        ("getiri_1y", "yukari_iyi", "1Y getiri", 1.0),
+        ("sharpe", "yukari_iyi", "Sharpe", 0.05),
+        ("max_drawdown", "yukari_iyi", "MaxDD", 1.0),  # -20 → -10 iyileşme
+        ("reel_1y", "yukari_iyi", "Reel 1Y", 1.0),
+        ("vs_bist100", "yukari_iyi", "vs BIST100", 1.0),
+        ("cagr", "yukari_iyi", "CAGR", 1.0),
+    ]
+
+    def _num(v):
+        try:
+            if v is None:
+                return None
+            x = float(v)
+            if x != x:  # nan
+                return None
+            return x
+        except (TypeError, ValueError):
+            return None
+
+    for alan, yon, etiket, esik in checks:
+        # yeni metriklerde çeşitli anahtar varyasyonları
+        nv = _num(yeni_metrikler.get(alan))
+        if nv is None:
+            nv = _num(yeni_metrikler.get(alan.lower()))
+        if nv is None and alan == "ROE":
+            nv = _num(yeni_metrikler.get("returnOnEquity"))
+        ov = _num(onceki.get(alan))
+        if nv is None or ov is None:
+            continue
+        delta = nv - ov
+        if yon == "yukari_iyi" and delta >= esik:
+            uyarilar.append(
+                f"⬆️ **{kod}** {etiket}: {ov:.2f} → **{nv:.2f}** (+{delta:.2f}) — önceki bilançoya göre iyileşme"
+            )
+        elif yon == "asagi_iyi" and delta <= -esik:
+            # F/K veya borç düşüşü
+            uyarilar.append(
+                f"⬇️ **{kod}** {etiket}: {ov:.2f} → **{nv:.2f}** ({delta:.2f}) — önceki döneme göre geriledi (çoğu durumda olumlu)"
+            )
+
+    # Kaydı güncelle (her zaman son değerleri sakla)
+    snap = {k: yeni_metrikler.get(k) for k in set([c[0] for c in checks]) | set(yeni_metrikler.keys())}
+    snap["_kayit"] = datetime.now().isoformat(timespec="seconds")
+    onceki_map[kod] = snap
+    state[key_store] = onceki_map
+    _save_bilanco_state(state)
+    return uyarilar
+
+
+def render_bilanco_bildirim_paneli():
+    """Ana sayfa: FON ve HİSSE bilanço bildirimlerini ayrı kartlarda gösterir."""
+    st.subheader("📋 Bilanço & dönem bildirimleri")
+    st.caption("Hisse (BIST/KAP) ve Fon (TEFAS) bildirimleri birbirinden bağımsızdır.")
+
+    col_h, col_f = st.columns(2)
+
+    # Yenile / probe
+    p1, p2 = st.columns([1, 3])
+    with p1:
+        do_probe = st.button("🔄 Dönemi kontrol et", key="btn_bilanco_check")
+    with p2:
+        do_probe_live = st.button("Canlı probe (İş Yatırım — hisse)", key="btn_bilanco_probe")
+
+    bild = bilanco_bildirimleri(probe=bool(do_probe_live))
+    hisse, fon = bild["hisse"], bild["fon"]
+
+    with col_h:
+        st.markdown("#### 🏦 Hisse (BIST)")
+        st.caption(hisse.get("kaynak") or "BIST")
+        etiket = hisse.get("etiket") or hisse.get("beklenen_etiket") or "—"
+        if hisse.get("yeni_donem") or hisse.get("durum") == "geldi":
+            st.success(f"✅ Son dönem: **{etiket}**")
+            if hisse.get("yeni_donem"):
+                st.warning(hisse.get("mesaj") or "Yeni bilanço dönemi")
+        elif hisse.get("durum") == "bekleniyor":
+            st.warning(f"⏳ {hisse.get('mesaj') or 'Bekleniyor'}")
+        else:
+            st.info(hisse.get("mesaj") or f"Dönem: {etiket}")
+        if hisse.get("probe") is True:
+            st.success("Probe: bilançolar erişilebilir")
+        elif hisse.get("probe") is False:
+            st.warning("Probe: henüz tam yayınlanmamış olabilir")
+        st.caption(f"Beklenen: {hisse.get('beklenen_etiket')}")
+
+    with col_f:
+        st.markdown("#### 📊 Fon (TEFAS)")
+        st.caption(fon.get("kaynak") or "TEFAS")
+        if fon.get("yeni_donem"):
+            st.warning(fon.get("mesaj") or "Yeni çeyrek")
+        else:
+            st.info(fon.get("mesaj") or "Günlük NAV")
+        st.caption(f"Raporlama çeyreği (takvim): {fon.get('etiket')}")
+        st.caption("Fonlarda KAP bilançosu yok; portföy dağılımı / AUM tarama ile güncellenir.")
+
+    # İyileşme uyarıları (önceki snapshot)
+    iyilesme = st.session_state.get("_bilanco_iyilesme") or []
+    if iyilesme:
+        st.markdown("#### 🟢 Önceki bilançoya göre iyileşenler")
+        for msg in iyilesme[:15]:
+            st.success(msg)
+    return bild
+
+
 def df_to_excel_bytes(df: pd.DataFrame, meta: dict = None) -> bytes:
     buf = io.BytesIO()
     # core.excel_kaydet dosyaya yazar; burada belleğe yazıyoruz
@@ -734,35 +1053,60 @@ def risk_badge(seviye: str) -> str:
 
 
 # ── Sidebar ─────────────────────────────────────────────────────────────────
+# ── Sayfa listesi (navigasyon) ─────────────────────────────────────────────
+SAYFA_LISTESI = [
+    "🏠 Ana Sayfa",
+    "🔍 Fon Tarama",
+    "📋 Tüm Fon Sıralaması",
+    "🧪 Filtre Stüdyosu",
+    "⚖️ Karşılaştırma",
+    "📁 Portföy",
+    "💼 Portföyüm",
+    "🎯 Optimizasyon",
+    "🔎 Fon Detay",
+    "📈 Hisse & Karma Portföy",
+    "🔎 Hisse Detay",
+    "🏦 BIST Değerleme",
+    "⭐ Favoriler",
+    "⚙️ Ayarlar",
+]
+
+
+def _goto(sayfa_adi: str, *, auto_sepet: bool = False):
+    """Programatik sayfa geçişi (sidebar butonları / sepet analizi)."""
+    if sayfa_adi in SAYFA_LISTESI:
+        st.session_state.sayfa = sayfa_adi
+    if auto_sepet:
+        st.session_state.sepet_auto_analiz = True
+
+
+# ── Sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("📊 TEFAS Analiz")
     st.caption("Fon tarama · risk · portföy · rapor")
 
+    # key="sayfa" → radio doğrudan session_state.sayfa yazar (_goto ile uyumlu)
+    _cur = st.session_state.get("sayfa", SAYFA_LISTESI[0])
+    if _cur not in SAYFA_LISTESI:
+        st.session_state.sayfa = SAYFA_LISTESI[0]
+        _cur = SAYFA_LISTESI[0]
     sayfa = st.radio(
         "Menü",
-        [
-            "🏠 Ana Sayfa",
-            "🔍 Fon Tarama",
-            "📋 Tüm Fon Sıralaması",
-            "🧪 Filtre Stüdyosu",
-            "⚖️ Karşılaştırma",
-            "📁 Portföy",
-            "💼 Portföyüm",
-            "🎯 Optimizasyon",
-            "🔎 Fon Detay",
-            "📈 Hisse & Karma Portföy",
-            "🔎 Hisse Detay",
-            "🏦 BIST Değerleme",
-            "⭐ Favoriler",
-            "⚙️ Ayarlar",
-        ],
+        SAYFA_LISTESI,
+        index=SAYFA_LISTESI.index(_cur),
         label_visibility="collapsed",
+        key="sayfa",
     )
 
-    tefas_portfoyum.sidebar_rozet(st)
+    try:
+        tefas_portfoyum.sidebar_rozet(st)
+    except Exception:
+        pass
     st.divider()
-    tip = st.selectbox("Fon tipi", ["YAT", "EMK", "BYF"], index=0)
-    st.session_state.fon_tipi = tip
+    tip = st.selectbox("Fon tipi", ["YAT", "EMK", "BYF"], index=["YAT", "EMK", "BYF"].index(st.session_state.get("fon_tipi", "YAT")) if st.session_state.get("fon_tipi") in ("YAT", "EMK", "BYF") else 0)
+    if tip != st.session_state.fon_tipi:
+        st.session_state.fon_tipi = tip
+        st.session_state.analiz = None  # tip değişince motoru yenile
 
     cfg = st.session_state.cfg
     st.caption(
@@ -770,7 +1114,10 @@ with st.sidebar:
         f"TÜFE: %{cfg.get('tufe_yillik')} · "
         f"Mevduat: %{cfg.get('mevduat_yillik')}"
     )
-    st.caption(f"Cache: `{core.CACHE_DIR.name}/`")
+    try:
+        st.caption(f"Cache: `{core.CACHE_DIR.name}/` · v{st.session_state.get('app_version', '2.1')}")
+    except Exception:
+        st.caption(f"v{st.session_state.get('app_version', '2.1')}")
     sepet = st.session_state.get("portfoy_sepet") or []
     st.divider()
     st.markdown(f"### 🛒 Sepet · {len(sepet)}")
@@ -778,16 +1125,19 @@ with st.sidebar:
         st.caption(", ".join(x["kod"] for x in sepet[:15]) + ("…" if len(sepet) > 15 else ""))
         b1, b2 = st.columns(2)
         with b1:
-            if st.button("Analiz et", key="sepet_analiz_side"):
-                st.session_state["_goto_portfoy"] = True
+            if st.button("Analiz et", key="sepet_analiz_side", use_container_width=True):
+                _goto("📁 Portföy", auto_sepet=True)
                 st.rerun()
         with b2:
-            if st.button("Temizle", key="sepet_temiz_side"):
+            if st.button("Temizle", key="sepet_temiz_side", use_container_width=True):
                 st.session_state.portfoy_sepet = []
                 st.session_state.sepet_analiz = None
                 st.rerun()
     else:
         st.caption("Tarama / sıralama / detay → Portföye ekle")
+
+# Aktif sayfa (state kaynaklı)
+sayfa = st.session_state.get("sayfa", SAYFA_LISTESI[0])
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -804,7 +1154,10 @@ if sayfa == "🏠 Ana Sayfa":
         unsafe_allow_html=True,
     )
 
-    tefas_panel.render_ana_panel()
+    try:
+        tefas_panel.render_ana_panel()
+    except Exception as e:
+        st.caption(f"Panel: {e}")
 
     sepet_n = len(st.session_state.get("portfoy_sepet") or [])
     sa = st.session_state.get("sepet_analiz") or {}
@@ -851,31 +1204,38 @@ if sayfa == "🏠 Ana Sayfa":
         else:
             st.caption("Henüz tarama yok")
     with o3:
-        st.markdown("**Bilanço dönemi**")
+        st.markdown("**Bilanço (özet)**")
         try:
-            bil = core.bilanco_donem_durumu(probe=False)
-        except Exception as e:
-            bil = {"durum": "?", "mesaj": str(e)}
-        if bil.get("durum") == "geldi":
-            st.success(f"✅ {bil.get('yil')}/{bil.get('donem'):02d} — bilançolar gelmiş olmalı")
-        elif bil.get("durum") == "bekleniyor":
-            st.warning(f"⏳ {bil.get('mesaj', '')}")
-        else:
-            st.info(bil.get("mesaj") or "—")
-        st.caption(bil.get("mesaj") or "")
-        if st.button("Canlı doğrula (İş Yatırım probe)", key="btn_bilanco_probe"):
-            with st.spinner("Probe hisseler kontrol ediliyor…"):
-                bil2 = core.bilanco_donem_durumu(probe=True)
-            if bil2.get("probe") is True:
-                st.success(bil2.get("mesaj"))
-            elif bil2.get("probe") is False:
-                st.warning(bil2.get("mesaj"))
+            _bmini = bilanco_bildirimleri(probe=False)
+            _h, _f = _bmini["hisse"], _bmini["fon"]
+            if _h.get("yeni_donem"):
+                st.warning(f"🏦 Hisse: yeni dönem {_h.get('etiket')}")
+            elif _h.get("durum") == "geldi":
+                st.success(f"🏦 Hisse: {_h.get('etiket')}")
             else:
-                st.info(bil2.get("mesaj") or "Probe doğrulanamadı (ağ)")
+                st.caption(f"🏦 Hisse: {_h.get('mesaj') or _h.get('etiket')}")
+            if _f.get("yeni_donem"):
+                st.warning(f"📊 Fon: {_f.get('etiket')} çeyrek")
+            else:
+                st.caption(f"📊 Fon: günlük NAV · çeyrek {_f.get('etiket')}")
+        except Exception as e:
+            st.caption(f"Bilanço: {e}")
+
+    # ── Bilanço bildirimleri (FON / HİSSE ayrı paneller) ───────────────────
+    try:
+        render_bilanco_bildirim_paneli()
+    except Exception as e:
+        st.caption(f"Bilanço paneli: {e}")
 
     # ── Alarmlar ───────────────────────────────────────────────────────────
     st.subheader("🔔 Alarmlar")
-    alarm_msgs = core.sepet_alarmlari(sa, st.session_state.cfg)
+    try:
+        alarm_msgs = list(core.sepet_alarmlari(sa, st.session_state.cfg) or [])
+    except Exception:
+        alarm_msgs = []
+    # Bilanço iyileşme uyarılarını alarm listesine ekle
+    for msg in (st.session_state.get("_bilanco_iyilesme") or []):
+        alarm_msgs.append(msg)
     # Ayar alarmları son tarama üzerinde
     al_cfg = (st.session_state.cfg or {}).get("alarmlar") or {}
     df_t = st.session_state.get("son_tarama")
@@ -2526,10 +2886,14 @@ elif sayfa == "📋 Tüm Fon Sıralaması":
 # KARŞILAŞTIRMA
 # ═══════════════════════════════════════════════════════════════════════════
 elif sayfa == "🧪 Filtre Stüdyosu":
-    tefas_filtre.render(
-        core=core, get_analiz=get_analiz, sepet_ekle=sepet_ekle, show_df=show_df,
-        download_excel_button=download_excel_button, fmt_num=fmt_num,
-    )
+    try:
+        tefas_filtre.render(
+            core=core, get_analiz=get_analiz, sepet_ekle=sepet_ekle, show_df=show_df,
+            download_excel_button=download_excel_button, fmt_num=fmt_num,
+        )
+    except Exception as e:
+        st.error(f"Filtre Stüdyosu yüklenemedi: {e}")
+        st.caption("tefas_filtre modülünü kontrol edin.")
 
 elif sayfa == "⚖️ Karşılaştırma":
     st.header("⚖️ Fon Karşılaştırma")
@@ -2569,10 +2933,15 @@ elif sayfa == "⚖️ Karşılaştırma":
 # ═══════════════════════════════════════════════════════════════════════════
 elif sayfa == "📁 Portföy":
     st.header("📁 Portföy Analizi")
+    # Sidebar "Analiz et" gelmişse sepet moduna zorla
+    _force_sepet = bool(st.session_state.get("sepet_auto_analiz"))
+    _mod_opts = ["🛒 Sepet (portföye ekle)", "Elle ağırlık", "Otomatik (en yüksek puan)"]
     mod = st.radio(
         "Mod",
-        ["🛒 Sepet (portföye ekle)", "Elle ağırlık", "Otomatik (en yüksek puan)"],
+        _mod_opts,
+        index=0 if _force_sepet else 0,
         horizontal=True,
+        key="portfoy_mod",
     )
 
     if mod == "🛒 Sepet (portföye ekle)":
@@ -2633,7 +3002,9 @@ elif sayfa == "📁 Portföy":
             else:
                 custom_w = {x["kod"]: 1.0 for x in sepet}
 
-            if st.button("📊 Sepeti analiz et + derin rapor", type="primary", key="btn_sepet_analiz"):
+            # Sidebar "Analiz et" → otomatik tetik
+            _auto = bool(st.session_state.pop("sepet_auto_analiz", False))
+            if st.button("📊 Sepeti analiz et + derin rapor", type="primary", key="btn_sepet_analiz") or _auto:
                 with st.spinner("Fonlar, korelasyon ve birleşik metrikler hesaplanıyor…"):
                     st.session_state.sepet_analiz = sepet_analiz_et(weights=custom_w)
 
@@ -2938,7 +3309,11 @@ elif sayfa == "📁 Portföy":
 # OPTİMİZASYON
 # ═══════════════════════════════════════════════════════════════════════════
 elif sayfa == "💼 Portföyüm":
-    tefas_portfoyum.render(core=core, get_analiz=get_analiz)
+    try:
+        tefas_portfoyum.render(core=core, get_analiz=get_analiz)
+    except Exception as e:
+        st.error(f"Portföyüm yüklenemedi: {e}")
+        st.caption("tefas_portfoyum modülünü kontrol edin.")
 
 elif sayfa == "🎯 Optimizasyon":
     st.header("🎯 Portföy Optimizasyonu")
@@ -3220,6 +3595,18 @@ elif sayfa == "🔎 Fon Detay":
         except Exception:
             pass
 
+        # Önceki fon metrik kaydı ile karşılaştır
+        try:
+            _fy = mali_tablo_iyilesme_kontrolu(kod, dict(m), tur="fon")
+            if _fy:
+                st.session_state["_bilanco_iyilesme"] = (
+                    list(st.session_state.get("_bilanco_iyilesme") or []) + _fy
+                )[-30:]
+                for _msg in _fy:
+                    st.success(_msg)
+        except Exception:
+            pass
+
         # Sade Türkçe değerlendirme (plain markdown — Streamlit HTML'i bazen boş gösteriyordu)
         st.subheader("Sade dilde değerlendirme")
         metin_deg = core.turkce_degerlendirme(
@@ -3484,15 +3871,495 @@ elif sayfa == "📈 Hisse & Karma Portföy":
 # FAVORİLER
 # ═══════════════════════════════════════════════════════════════════════════
 elif sayfa == "🏦 BIST Değerleme":
-    tefas_bist.render(show_df=show_df, download_excel_button=download_excel_button)
+    try:
+        tefas_bist.render(show_df=show_df, download_excel_button=download_excel_button)
+    except Exception as e:
+        st.error(f"BIST Değerleme yüklenemedi: {e}")
+        st.caption("tefas_bist modülünü kontrol edin.")
 
 elif sayfa == "🔎 Hisse Detay":
-    st.info(
-        "Hisse kodu/adı ile **tüm değerleme alanlarını** görmek için "
-        "**🏦 BIST Değerleme → 🔎 Hisse Detay** sekmesini kullanın "
-        "(rapor seç → kod veya şirket adı yazın)."
+    st.header("🔎 Hisse Detay Analizi")
+    st.caption(
+        "Excel «Hisse Analiz» sayfası tarzında: fiyat · getiri · risk · değerleme · "
+        "grafikler · BIST karşılaştırması. Kod örn. THYAO, GARAN, ASELS."
     )
-    tefas_bist.render(show_df=show_df, download_excel_button=download_excel_button)
+
+    def _hisse_sembol_normalize(raw: str) -> str:
+        s = (raw or "").strip().upper().replace(" ", "")
+        if not s:
+            return ""
+        if s.endswith(".IS"):
+            return s
+        # BIST kısa kod
+        if len(s) <= 6 and s.replace(".", "").isalnum():
+            return f"{s}.IS"
+        return s
+
+    def _df_from_yfinance(sembol: str, period: str = "3y"):
+        """Yahoo Finance fallback — fiyat + info."""
+        try:
+            import yfinance as yf
+        except ImportError:
+            return None, None, "yfinance yüklü değil: pip install yfinance"
+        try:
+            t = yf.Ticker(sembol)
+            hist = t.history(period=period, auto_adjust=True)
+            if hist is None or hist.empty:
+                return None, None, f"{sembol}: fiyat verisi yok"
+            hist = hist.reset_index()
+            # tarih kolonunu normalize
+            date_col = "Date" if "Date" in hist.columns else hist.columns[0]
+            hist = hist.rename(columns={date_col: "tarih", "Close": "fiyat", "Volume": "hacim"})
+            hist["tarih"] = pd.to_datetime(hist["tarih"]).dt.tz_localize(None)
+            info = {}
+            try:
+                info = dict(t.info or {})
+            except Exception:
+                info = {}
+            return hist[["tarih", "fiyat"] + (["hacim"] if "hacim" in hist.columns else [])], info, None
+        except Exception as e:
+            return None, None, str(e)
+
+    def _metrikler_from_fd(fd: pd.DataFrame, rf: float, cfg: dict) -> dict:
+        """core.full_metrics + benchmark varsa attach."""
+        m = {}
+        try:
+            m = core.full_metrics(fd, rf=rf) or {}
+        except Exception:
+            # minimal fallback
+            try:
+                s = fd.set_index("tarih")["fiyat"].astype(float).sort_index()
+                s = s[~s.index.duplicated(keep="last")]
+                rets = s.pct_change().dropna()
+                if len(rets) < 5:
+                    return {}
+                def _g(n):
+                    if len(s) <= n:
+                        return None
+                    return float((s.iloc[-1] / s.iloc[-n] - 1) * 100)
+                m = {
+                    "fiyat": float(s.iloc[-1]),
+                    "getiri_1a": _g(22), "getiri_3a": _g(66),
+                    "getiri_6a": _g(132), "getiri_1y": _g(252),
+                    "volatilite": float(rets.std() * (252 ** 0.5) * 100),
+                    "kazanma_orani": float((rets > 0).mean() * 100),
+                }
+                cum = (1 + rets).cumprod()
+                dd = (cum / cum.cummax() - 1) * 100
+                m["max_drawdown"] = float(dd.min())
+                excess = rets - (rf / 252)
+                vol = rets.std()
+                m["sharpe"] = float((excess.mean() / vol) * (252 ** 0.5)) if vol > 0 else None
+            except Exception:
+                return {}
+        try:
+            m = core.attach_benchmark(m, core.fetch_benchmarks(cfg))
+        except Exception:
+            pass
+        return m
+
+    def _degerleme_from_info(info: dict) -> dict:
+        """Yahoo info → Excel tarzı değerleme alanları."""
+        if not info:
+            return {}
+        map_keys = {
+            "longName": "şirket",
+            "shortName": "kısa_ad",
+            "sector": "sektör",
+            "industry": "endüstri",
+            "currency": "para_birimi",
+            "currentPrice": "fiyat",
+            "previousClose": "önceki_kapanış",
+            "open": "açılış",
+            "dayLow": "gün_düşük",
+            "dayHigh": "gün_yüksek",
+            "fiftyTwoWeekLow": "52h_düşük",
+            "fiftyTwoWeekHigh": "52h_yüksek",
+            "volume": "hacim",
+            "averageVolume": "ort_hacim",
+            "marketCap": "piyasa_değeri",
+            "enterpriseValue": "firma_değeri",
+            "trailingPE": "F/K",
+            "forwardPE": "F/K_ileri",
+            "priceToBook": "PD/DD",
+            "enterpriseToEbitda": "FD/FAVÖK",
+            "enterpriseToRevenue": "FD/Satış",
+            "pegRatio": "PEG",
+            "profitMargins": "net_kar_marjı",
+            "grossMargins": "brüt_marj",
+            "operatingMargins": "faaliyet_marjı",
+            "returnOnEquity": "ROE",
+            "returnOnAssets": "ROA",
+            "debtToEquity": "borç/özkaynak",
+            "currentRatio": "cari_oran",
+            "quickRatio": "asit_test",
+            "dividendYield": "temettü_getirisi",
+            "payoutRatio": "temettü_ödeme",
+            "beta": "beta",
+            "trailingEps": "EPS",
+            "bookValue": "defter_değeri",
+            "targetMeanPrice": "hedef_fiyat",
+            "recommendationKey": "tavsiye",
+            "numberOfAnalystOpinions": "analist_sayısı",
+            "sharesOutstanding": "hisse_adet",
+            "floatShares": "serbest_dolaşım",
+            "heldPercentInsiders": "içeriden_%",
+            "heldPercentInstitutions": "kurumsal_%",
+        }
+        out = {}
+        for k, tr in map_keys.items():
+            v = info.get(k)
+            if v is None:
+                continue
+            # oranlar yüzdeye
+            if tr in ("net_kar_marjı", "brüt_marj", "faaliyet_marjı", "ROE", "ROA",
+                      "temettü_getirisi", "temettü_ödeme", "içeriden_%", "kurumsal_%") and isinstance(v, (int, float)):
+                # yahoo çoğu zaten 0-1
+                if abs(v) <= 1.5:
+                    v = v * 100
+            out[tr] = v
+        return out
+
+    def _draw_hisse_charts(fd: pd.DataFrame, m: dict, sembol: str, bm_rets=None):
+        """Fiyat, kümülatif getiri, drawdown, hacim grafikleri."""
+        if fd is None or fd.empty or "fiyat" not in fd.columns:
+            st.info("Grafik için fiyat serisi yok.")
+            return
+        s = fd.copy()
+        s["tarih"] = pd.to_datetime(s["tarih"])
+        s = s.sort_values("tarih").drop_duplicates("tarih", keep="last")
+        s = s.set_index("tarih")
+        px = s["fiyat"].astype(float)
+        rets = px.pct_change().dropna()
+        cum = (1 + rets).cumprod()
+        peak = cum.cummax()
+        dd = (cum / peak - 1.0) * 100
+
+        g1, g2 = st.columns(2)
+        with g1:
+            st.markdown("**Fiyat (TL)**")
+            st.line_chart(px.rename("Fiyat"))
+        with g2:
+            st.markdown("**Kümülatif getiri (normalize=1)**")
+            chart_df = cum.rename("Hisse").to_frame()
+            if bm_rets is not None and len(bm_rets):
+                try:
+                    bm = bm_rets.reindex(cum.index).fillna(0)
+                    chart_df["BIST100"] = (1 + bm).cumprod()
+                    # hizala başlangıç
+                    chart_df = chart_df / chart_df.iloc[0]
+                except Exception:
+                    pass
+            st.line_chart(chart_df)
+        g3, g4 = st.columns(2)
+        with g3:
+            st.markdown("**Drawdown %**")
+            st.area_chart(dd.rename("DD %"))
+        with g4:
+            if "hacim" in s.columns and s["hacim"].notna().any():
+                st.markdown("**İşlem hacmi**")
+                vol = s["hacim"].astype(float)
+                st.bar_chart(vol.rename("Hacim").tail(120))
+            else:
+                st.markdown("**Aylık getiri % (son 24 ay)**")
+                try:
+                    monthly = px.resample("ME").last().pct_change().dropna() * 100
+                    st.bar_chart(monthly.tail(24).rename("Aylık %"))
+                except Exception:
+                    st.caption("Aylık getiri hesaplanamadı")
+
+        # Getiri özeti bar
+        st.markdown("**Dönem getirileri %**")
+        donem = {}
+        for k, label in [
+            ("getiri_1a", "1A"), ("getiri_3a", "3A"), ("getiri_6a", "6A"),
+            ("getiri_1y", "1Y"), ("cagr", "CAGR"),
+        ]:
+            if m.get(k) is not None:
+                try:
+                    donem[label] = float(m[k])
+                except (TypeError, ValueError):
+                    pass
+        if donem:
+            st.bar_chart(pd.Series(donem, name="Getiri %"))
+
+    # ── Girdi ──────────────────────────────────────────────────────────────
+    c_in, c_btn, c_per = st.columns([3, 1, 1])
+    with c_in:
+        raw_kod = st.text_input(
+            "Hisse kodu veya adı",
+            value=st.session_state.get("hisse_detay_kod", "THYAO"),
+            placeholder="THYAO  ·  GARAN  ·  ASELS.IS",
+            key="hisse_detay_input",
+        ).strip()
+    with c_per:
+        period = st.selectbox("Periyot", ["1y", "2y", "3y", "5y", "max"], index=2, key="hisse_det_per")
+    with c_btn:
+        st.write("")
+        st.write("")
+        run = st.button("🔍 Analiz et", type="primary", use_container_width=True, key="btn_hisse_detay")
+
+    if run and raw_kod:
+        st.session_state.hisse_detay_kod = raw_kod
+        sembol = _hisse_sembol_normalize(raw_kod)
+        analiz = get_analiz()
+        det = None
+        err = None
+        with st.spinner(f"{sembol} analiz ediliyor…"):
+            # 1) core.hisse_analiz
+            try:
+                det = core.hisse_analiz(sembol, rf=analiz.rf, cfg=st.session_state.cfg)
+                if isinstance(det, dict) and det.get("error"):
+                    err = det.get("error")
+                    det = None
+            except Exception as e:
+                err = str(e)
+                det = None
+            # 2) yfinance fallback
+            info = {}
+            if det is None:
+                fd, info, yerr = _df_from_yfinance(sembol, period=period)
+                if yerr:
+                    st.error(yerr if not err else f"{err} · {yerr}")
+                    st.stop()
+                m = _metrikler_from_fd(fd, analiz.rf, st.session_state.cfg)
+                det = {
+                    "kod": sembol.replace(".IS", ""),
+                    "sembol": sembol,
+                    "fiyat_df": fd,
+                    "metrikler": m,
+                    "info": info,
+                    "kaynak": "yfinance",
+                }
+            else:
+                # core başarılı — info için yine de yf dene
+                try:
+                    _, info, _ = _df_from_yfinance(sembol, period=period)
+                    det["info"] = info or det.get("info") or {}
+                except Exception:
+                    det["info"] = det.get("info") or {}
+                if det.get("fiyat_df") is None or (hasattr(det.get("fiyat_df"), "empty") and det["fiyat_df"].empty):
+                    fd, info2, _ = _df_from_yfinance(sembol, period=period)
+                    if fd is not None:
+                        det["fiyat_df"] = fd
+                        if info2:
+                            det["info"] = info2
+        st.session_state.hisse_detay_sonuc = det
+
+    det = st.session_state.get("hisse_detay_sonuc")
+    if not det:
+        st.info("Hisse kodu girip **Analiz et**’e basın. Örnek: THYAO, GARAN, EREGL, TUPRS, ASELS.")
+    else:
+        m = det.get("metrikler") or {}
+        info = det.get("info") or {}
+        deg = _degerleme_from_info(info)
+        kod = det.get("kod") or ""
+        sembol = det.get("sembol") or kod
+        ad = deg.get("şirket") or deg.get("kısa_ad") or info.get("longName") or sembol
+        sektor = deg.get("sektör") or info.get("sector") or "—"
+        endustri = deg.get("endüstri") or info.get("industry") or "—"
+
+        st.subheader(f"`{kod}` — {ad}")
+        st.caption(f"{sembol} · {sektor} · {endustri} · kaynak: {det.get('kaynak') or 'core'}")
+
+        # KPI şeridi
+        k1, k2, k3, k4, k5, k6 = st.columns(6)
+        k1.metric("Fiyat", fmt_num(m.get("fiyat") or deg.get("fiyat"), 2))
+        k2.metric("1Y %", fmt_num(m.get("getiri_1y")))
+        k3.metric("Sharpe", fmt_num(m.get("sharpe"), 2))
+        k4.metric("MaxDD %", fmt_num(m.get("max_drawdown")))
+        k5.metric("Vol %", fmt_num(m.get("volatilite")))
+        k6.metric("Beta", fmt_num(deg.get("beta"), 2) if deg.get("beta") is not None else fmt_num(m.get("bist_korelasyon"), 2))
+
+        k7, k8, k9, k10, k11, k12 = st.columns(6)
+        k7.metric("3A %", fmt_num(m.get("getiri_3a")))
+        k8.metric("6A %", fmt_num(m.get("getiri_6a")))
+        k9.metric("Reel 1Y", fmt_num(m.get("reel_1y")))
+        k10.metric("vs BIST", fmt_num(m.get("vs_bist100")))
+        k11.metric("F/K", fmt_num(deg.get("F/K"), 1))
+        k12.metric("PD/DD", fmt_num(deg.get("PD/DD"), 2))
+
+        # Önceki bilanço / metrik kaydı ile karşılaştır → iyileşme uyarısı
+        _cmp = dict(m)
+        _cmp.update({k: deg.get(k) for k in ("ROE", "ROA", "F/K", "PD/DD", "borç/özkaynak", "net_kar_marjı") if deg.get(k) is not None})
+        try:
+            _iy = mali_tablo_iyilesme_kontrolu(kod or sembol, _cmp, tur="hisse")
+            if _iy:
+                st.session_state["_bilanco_iyilesme"] = (
+                    list(st.session_state.get("_bilanco_iyilesme") or []) + _iy
+                )[-30:]
+                for _msg in _iy:
+                    st.success(_msg)
+            else:
+                st.caption("Önceki bilanço kaydı yok veya anlamlı değişiklik yok (ilk analiz kayıt altına alındı).")
+        except Exception as _e:
+            st.caption(f"İyileşme kontrolü: {_e}")
+
+        tab_g, tab_r, tab_d, tab_v, tab_x = st.tabs([
+            "📈 Grafikler", "📊 Getiri & Risk", "💰 Değerleme", "📝 Değerlendirme", "📥 Excel / HTML",
+        ])
+
+        with tab_g:
+            bm = None
+            try:
+                bm = core.yahoo_daily_returns("XU100.IS")
+            except Exception:
+                pass
+            _draw_hisse_charts(det.get("fiyat_df"), m, sembol, bm_rets=bm)
+
+        with tab_r:
+            st.markdown("#### Getiri metrikleri")
+            getiri_rows = {
+                "1A %": m.get("getiri_1a"), "3A %": m.get("getiri_3a"),
+                "6A %": m.get("getiri_6a"), "1Y %": m.get("getiri_1y"),
+                "3Y %": m.get("getiri_3y"), "CAGR %": m.get("cagr"),
+                "Reel 1Y %": m.get("reel_1y"),
+                "vs Mevduat": m.get("vs_mevduat"), "vs BIST100": m.get("vs_bist100"),
+            }
+            st.dataframe(
+                pd.DataFrame([{"Metrik": k, "Değer": v} for k, v in getiri_rows.items() if v is not None]),
+                hide_index=True, use_container_width=True,
+            )
+            st.markdown("#### Risk metrikleri")
+            risk_rows = {
+                "Volatilite %": m.get("volatilite"), "Max Drawdown %": m.get("max_drawdown"),
+                "Sharpe": m.get("sharpe"), "Sortino": m.get("sortino"),
+                "Calmar": m.get("calmar"), "VaR %95": m.get("var95"),
+                "cVaR %95": m.get("cvar95"), "Kazanma oranı %": m.get("kazanma_orani"),
+                "En kötü gün %": m.get("en_kotu_gun"), "En iyi gün %": m.get("en_iyi_gun"),
+                "BIST korelasyon": m.get("bist_korelasyon"), "Risk skor": m.get("risk_skor"),
+            }
+            st.dataframe(
+                pd.DataFrame([{"Metrik": k, "Değer": v} for k, v in risk_rows.items() if v is not None]),
+                hide_index=True, use_container_width=True,
+            )
+
+        with tab_d:
+            st.markdown("#### Excel tarzı değerleme alanları")
+            if not deg:
+                st.info(
+                    "Değerleme için Yahoo Finance bilgisi gerekir. "
+                    "`pip install yfinance` sonrası yeniden analiz edin."
+                )
+            else:
+                # Gruplar
+                groups = {
+                    "Piyasa": ["fiyat", "önceki_kapanış", "açılış", "gün_düşük", "gün_yüksek",
+                               "52h_düşük", "52h_yüksek", "hacim", "ort_hacim", "piyasa_değeri", "firma_değeri"],
+                    "Çarpanlar": ["F/K", "F/K_ileri", "PD/DD", "FD/FAVÖK", "FD/Satış", "PEG", "EPS", "defter_değeri"],
+                    "Kârlılık": ["ROE", "ROA", "net_kar_marjı", "brüt_marj", "faaliyet_marjı"],
+                    "Bilanço / risk": ["borç/özkaynak", "cari_oran", "asit_test", "beta"],
+                    "Temettü / sahiplik": ["temettü_getirisi", "temettü_ödeme", "içeriden_%", "kurumsal_%",
+                                           "serbest_dolaşım", "hisse_adet"],
+                    "Analist": ["hedef_fiyat", "tavsiye", "analist_sayısı"],
+                }
+                for gname, keys in groups.items():
+                    rows = []
+                    for k in keys:
+                        if k in deg and deg[k] is not None:
+                            v = deg[k]
+                            if isinstance(v, float):
+                                if k in ("piyasa_değeri", "firma_değeri", "hacim", "ort_hacim",
+                                         "serbest_dolaşım", "hisse_adet"):
+                                    if abs(v) >= 1e9:
+                                        disp = f"{v/1e9:.2f} Mr"
+                                    elif abs(v) >= 1e6:
+                                        disp = f"{v/1e6:.1f} Mn"
+                                    else:
+                                        disp = f"{v:,.0f}"
+                                else:
+                                    disp = f"{v:.2f}"
+                            else:
+                                disp = str(v)
+                            rows.append({"Alan": k, "Değer": disp})
+                    if rows:
+                        st.markdown(f"**{gname}**")
+                        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+        with tab_v:
+            st.markdown("#### Sade dilde değerlendirme")
+            try:
+                st.markdown(core.turkce_degerlendirme(
+                    sharpe=m.get("sharpe"), sortino=m.get("sortino"),
+                    max_dd=m.get("max_drawdown"), vol=m.get("volatilite"),
+                    cagr=m.get("cagr"), calmar=m.get("calmar"),
+                    getiri_1y=m.get("getiri_1y"), reel_1y=m.get("reel_1y"),
+                    vs_mevduat=m.get("vs_mevduat"), vs_bist100=m.get("vs_bist100"),
+                    kazanma_orani=m.get("kazanma_orani"),
+                    en_kotu_gun=m.get("en_kotu_gun"),
+                    bist_korelasyon=m.get("bist_korelasyon") or deg.get("beta"),
+                    plain=True,
+                ))
+            except Exception as e:
+                st.caption(f"Değerlendirme: {e}")
+            # Kısa değerleme yorumu
+            yorumlar = []
+            fk = deg.get("F/K")
+            if isinstance(fk, (int, float)):
+                if fk < 8:
+                    yorumlar.append(f"F/K **{fk:.1f}** — görece ucuz çarpan (sektör ort. ile karşılaştırın).")
+                elif fk > 25:
+                    yorumlar.append(f"F/K **{fk:.1f}** — yüksek çarpan; büyüme fiyatlanmış olabilir.")
+            pddd = deg.get("PD/DD")
+            if isinstance(pddd, (int, float)):
+                if pddd < 1:
+                    yorumlar.append(f"PD/DD **{pddd:.2f}** — defter değerinin altında.")
+                elif pddd > 3:
+                    yorumlar.append(f"PD/DD **{pddd:.2f}** — defter değerine göre primli.")
+            roe = deg.get("ROE")
+            if isinstance(roe, (int, float)) and roe > 15:
+                yorumlar.append(f"ROE **%{roe:.1f}** — güçlü özkaynak kârlılığı.")
+            if yorumlar:
+                st.markdown("#### Değerleme notları")
+                for y in yorumlar:
+                    st.markdown(f"- {y}")
+
+        with tab_x:
+            # Excel: metrik + değerleme tek satır
+            row = {"kod": kod, "sembol": sembol, "ad": ad, "sektör": sektor, "endüstri": endustri}
+            row.update({k: m.get(k) for k in (
+                "fiyat", "getiri_1a", "getiri_3a", "getiri_6a", "getiri_1y", "getiri_3y",
+                "reel_1y", "vs_mevduat", "vs_bist100", "cagr",
+                "volatilite", "max_drawdown", "sharpe", "sortino", "calmar",
+                "var95", "cvar95", "kazanma_orani", "en_kotu_gun", "en_iyi_gun",
+                "bist_korelasyon", "risk_skor",
+            )})
+            for k, v in deg.items():
+                if k not in row:
+                    row[f"d_{k}"] = v
+            edf = pd.DataFrame([row])
+            download_excel_button(
+                edf,
+                f"hisse_detay_{kod}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                meta={"mod": "hisse_detay", "sembol": sembol, "ad": ad},
+                key="xl_hisse_detay",
+            )
+            if st.button("📄 HTML risk raporu", key="btn_hisse_det_html"):
+                fd = det.get("fiyat_df")
+                if fd is None or len(fd) < 30:
+                    st.warning("Yeterli fiyat serisi yok.")
+                else:
+                    try:
+                        path = core.turkce_risk_raporu(
+                            fd, kod, ad=ad, rf=get_analiz().rf,
+                            benchmark_returns=core.yahoo_daily_returns("XU100.IS"),
+                            ekstra_metrikler=m,
+                        )
+                        if path:
+                            st.success(str(path))
+                            with open(path, "rb") as f:
+                                st.download_button(
+                                    "HTML indir", f, file_name=Path(path).name,
+                                    mime="text/html", key="dl_hisse_det_html",
+                                )
+                    except Exception as e:
+                        st.error(f"Rapor: {e}")
+
+            if st.button("🛒 Portföy sepetine ekle (fon değil — not)", key="hisse_sepet_info"):
+                st.info(
+                    "Sepet şu an TEFAS fon kodları içindir. "
+                    "Hisseyi **Hisse & Karma Portföy** sekmesinden karma portföye ekleyebilirsiniz."
+                )
 
 elif sayfa == "⭐ Favoriler":
     st.header("⭐ Favoriler")
@@ -3590,3 +4457,16 @@ elif sayfa == "⚙️ Ayarlar":
                 pass
         st.success("Cache silindi.")
         st.rerun()
+
+
+# ── Alt bilgi (her sayfada) ─────────────────────────────────────────────────
+st.markdown(
+    """
+<div class="disclaimer">
+  <b>Uyarı:</b> Bu uygulama bilgilendirme amaçlıdır; yatırım tavsiyesi değildir.
+  Geçmiş performans geleceği garanti etmez. TEFAS / Yahoo verileri gecikmeli olabilir.
+  Kararlarınızı kendi risk tercihinize ve profesyonel danışmana göre verin.
+</div>
+""",
+    unsafe_allow_html=True,
+)
