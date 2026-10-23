@@ -1,0 +1,714 @@
+# -*- coding: utf-8 -*-
+"""
+Piyasa Paneli (ön sayfa)
+========================
+Günlük olarak güncellenen:
+  • 🆕 Yeni bilançolar   — KAP "Finansal Rapor" bildirimleri + İş Yatırım MaliTablo dönem yoklaması
+  • 📈 Hisseler          — günlük / haftalık / aylık en çok artan ve düşen (Yahoo Finance)
+  • 💰 Fonlar            — günlük / haftalık / aylık en çok artan ve düşen (TEFAS)
+Yeni bilanço gelince BIST değerlemesinin yenilenmesi gerektiği işaretlenir; istenirse değerleme otomatik
+(veya tek tıkla) yeniden çalıştırılır.
+
+Çalışma biçimleri
+  1) Uygulama içi: arka plan zamanlayıcı (st.cache_resource) — 10:30 ve 19:00'dan (TSİ, hafta içi) sonra
+     veri eskiyse kendiliğinden yeniler.
+  2) Dışarıdan: `python panel_guncelle.py` (cron / GitHub Actions) → panel_data/*.json günceller.
+Veri kaynağına ulaşılamazsa panel sahte veri üretmez; "veri alınamadı" gösterir ve son başarılı veriyi korur.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+import requests
+
+try:  # Windows'ta tzdata gerekir (requirements.txt)
+    from zoneinfo import ZoneInfo
+    TZ = ZoneInfo("Europe/Istanbul")
+except Exception:  # noqa: BLE001
+    TZ = None
+
+ROOT = Path(__file__).resolve().parent
+DATA_DIR = ROOT / "panel_data"
+HEDEF_SAATLER = [(10, 30), (19, 0)]          # hafta içi güncelleme hedefleri (TSİ)
+RETRY_BEKLEME_DK = 60                         # başarısız denemeden sonra yeniden deneme aralığı
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124 Safari/537.36"}
+YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}.IS"
+
+_RUN_LOCK = threading.Lock()
+_STATE = {"running": False, "part": "", "done": 0, "total": 0}
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+
+# ── yardımcılar ─────────────────────────────────────────────────────────────
+def now() -> datetime:
+    return datetime.now(TZ) if TZ else datetime.now()
+
+
+def _iso(dt: Optional[datetime] = None) -> str:
+    return (dt or now()).strftime("%Y-%m-%d %H:%M")
+
+
+def _parse(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        d = datetime.strptime(s[:16], "%Y-%m-%d %H:%M")
+        return d.replace(tzinfo=TZ) if TZ else d
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def load(name: str, default=None):
+    p = DATA_DIR / f"{name}.json"
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {} if default is None else default
+
+
+def save(name: str, obj) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    p = DATA_DIR / f"{name}.json"
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def _fold(s: str) -> str:
+    return str(s or "").translate(str.maketrans("ıİşŞğĞüÜöÖçÇ", "iisSgGuUoOcC")).lower()
+
+
+def _core():
+    import tefas_core
+    return tefas_core
+
+
+def _vbist():
+    import vbist_degerleme_v193 as V
+    return V
+
+
+def hedef_zamani(t: Optional[datetime] = None) -> datetime:
+    """Şu andan önceki en yakın hafta-içi güncelleme hedefi."""
+    t = t or now()
+    for gun in range(0, 8):
+        d = (t - timedelta(days=gun)).date()
+        if d.weekday() >= 5:
+            continue
+        for h, m in sorted(HEDEF_SAATLER, reverse=True):
+            dt = datetime(d.year, d.month, d.day, h, m, tzinfo=TZ) if TZ else datetime(d.year, d.month, d.day, h, m)
+            if dt <= t:
+                return dt
+    return t
+
+
+def due(meta: dict, t: Optional[datetime] = None) -> bool:
+    t = t or now()
+    deneme = _parse(meta.get("son_deneme"))
+    if deneme and (t - deneme) < timedelta(minutes=RETRY_BEKLEME_DK):
+        return False
+    son = _parse(meta.get("son_guncelleme"))
+    return son is None or son < hedef_zamani(t)
+
+
+def _degisim(s: pd.Series) -> Optional[dict]:
+    """Fiyat serisinden (tarih indeksli) 1g / ~1 hafta / ~1 ay % değişim."""
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    s = s[s > 0].sort_index()
+    if len(s) < 2:
+        return None
+    son, t = float(s.iloc[-1]), s.index[-1]
+
+    def _at(gun: int) -> Optional[float]:
+        sub = s[s.index <= t - pd.Timedelta(days=gun)]
+        return float(sub.iloc[-1]) if len(sub) else None
+
+    h, a = _at(7), _at(30)
+    return {"tarih": t.strftime("%Y-%m-%d"), "fiyat": round(son, 6),
+            "g1": round((son / float(s.iloc[-2]) - 1) * 100, 3),
+            "h1": round((son / h - 1) * 100, 3) if h else None,
+            "a1": round((son / a - 1) * 100, 3) if a else None}
+
+
+# ── Fonlar ──────────────────────────────────────────────────────────────────
+def guncelle_fonlar(workers: int = 8, tipler: Tuple[str, ...] = ("YAT",), max_fon: int = 0) -> dict:
+    core = _core()
+    kodlar: List[Tuple[str, str, str]] = []
+    for tip in tipler:
+        dag = core.TefasAPI(fon_tipi=tip, sleep=0.0).dagilimlar()
+        for _, r in dag.iterrows():
+            ad = str(r.get("ad") or "")
+            if core.kurucu_yasakli_mi(ad) or core.unvan_tasfiye_mi(ad):
+                continue
+            kodlar.append((str(r["kod"]), ad, tip))
+    if not kodlar:
+        raise RuntimeError("TEFAS fon listesi alınamadı.")
+    if max_fon:
+        kodlar = kodlar[:max_fon]
+    local = threading.local()
+    _STATE.update(part="fon", done=0, total=len(kodlar))
+
+    def work(it):
+        kod, ad, tip = it
+        api = getattr(local, "api", None)
+        if api is None:
+            api = local.api = core.TefasAPI(fon_tipi=tip, sleep=0.05)
+        rows = []
+        for _ in range(2):
+            rows = api._post("/api/funds/fonFiyatBilgiGetir", {"fonKodu": kod.upper(), "dil": "TR", "periyod": 1},
+                             ckey=None)
+            if rows:
+                break
+            time.sleep(0.6)
+        if not rows:
+            return None
+        df = pd.DataFrame(rows)
+        if "tarih" not in df.columns or "fiyat" not in df.columns:
+            return None
+        df["tarih"] = pd.to_datetime(df["tarih"], errors="coerce")
+        s = df.dropna(subset=["tarih"]).drop_duplicates("tarih").set_index("tarih")["fiyat"]
+        d = _degisim(s)
+        return None if d is None else {"kod": kod, "ad": ad, "tip": tip, **d}
+
+    out = []
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for f in as_completed([ex.submit(work, k) for k in kodlar]):
+            _STATE["done"] += 1
+            try:
+                r = f.result()
+            except Exception:  # noqa: BLE001
+                r = None
+            if r:
+                out.append(r)
+    if len(out) < max(5, len(kodlar) * 0.1):
+        raise RuntimeError(f"Yeterli fon fiyatı alınamadı ({len(out)}/{len(kodlar)}).")
+    veri_tarihi = max(r["tarih"] for r in out)
+    obj = {"guncelleme": _iso(), "veri_tarihi": veri_tarihi, "taranan": len(kodlar), "kayitlar": out}
+    save("fon", obj)
+    return obj
+
+
+# ── Hisseler ────────────────────────────────────────────────────────────────
+def bist_evren() -> Tuple[List[str], Dict[str, dict]]:
+    """Hisse kodları (+ piyasa değeri bilgisi). Önce canlı İş Yatırım tablosu, olmazsa önceki kayıt."""
+    try:
+        V = _vbist()
+        ratios = V.get_ratios(requests.Session())
+        kodlar = sorted(k for k in ratios if re.fullmatch(r"[A-Z0-9]{3,6}", k))
+        if len(kodlar) >= 50:
+            return kodlar, {k: {"cap": ratios[k].get("cap")} for k in kodlar}
+    except Exception:  # noqa: BLE001
+        pass
+    eski = load("hisse").get("kayitlar") or []
+    if eski:
+        return [r["kod"] for r in eski], {r["kod"]: {"cap": r.get("cap")} for r in eski}
+    raise RuntimeError("BIST hisse listesi alınamadı (İş Yatırım erişimi yok, önceki kayıt da yok).")
+
+
+def _yahoo_hisse(code: str, sess: requests.Session) -> Optional[dict]:
+    for deneme in range(3):
+        try:
+            r = sess.get(YAHOO.format(sym=code), params={"range": "3mo", "interval": "1d"}, headers=UA, timeout=20)
+            if r.status_code == 429:
+                time.sleep(1.5 * (deneme + 1))
+                continue
+            r.raise_for_status()
+            res = r.json()["chart"]["result"][0]
+            q = res["indicators"]["quote"][0]
+            idx = pd.to_datetime(res["timestamp"], unit="s", utc=True)
+            idx = (idx.tz_convert("Europe/Istanbul") if TZ else idx).tz_localize(None).normalize()
+            close = pd.Series(q["close"], index=idx, dtype="float64")
+            vol = pd.Series(q.get("volume") or [np.nan] * len(idx), index=idx, dtype="float64")
+            ok = close.notna() & ~close.index.duplicated(keep="last")
+            close, vol = close[ok], vol[ok]
+            d = _degisim(close)
+            if d is None:
+                return None
+            ciro = float((close * vol).tail(20).mean()) if vol.notna().any() else None
+            return {"kod": code, **d, "ciro": None if ciro is None or np.isnan(ciro) else round(ciro, 0)}
+        except Exception:  # noqa: BLE001
+            time.sleep(0.5)
+    return None
+
+
+def guncelle_hisseler(workers: int = 10) -> dict:
+    kodlar, bilgi = bist_evren()
+    _STATE.update(part="hisse", done=0, total=len(kodlar))
+    sess = requests.Session()
+    out = []
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for f in as_completed([ex.submit(_yahoo_hisse, k, sess) for k in kodlar]):
+            _STATE["done"] += 1
+            try:
+                r = f.result()
+            except Exception:  # noqa: BLE001
+                r = None
+            if r:
+                r["cap"] = (bilgi.get(r["kod"]) or {}).get("cap")
+                out.append(r)
+    if len(out) < max(10, len(kodlar) * 0.2):
+        raise RuntimeError(f"Yeterli hisse fiyatı alınamadı ({len(out)}/{len(kodlar)}).")
+    obj = {"guncelleme": _iso(), "veri_tarihi": max(r["tarih"] for r in out), "taranan": len(kodlar), "kayitlar": out}
+    save("hisse", obj)
+    return obj
+
+
+# ── Bilançolar ──────────────────────────────────────────────────────────────
+def son_biten_donem(bugun: date, gecikme: int = 3) -> Tuple[int, int]:
+    for yil in (bugun.year, bugun.year - 1):
+        for p, (m, d) in ((12, (12, 31)), (9, (9, 30)), (6, (6, 30)), (3, (3, 31))):
+            if date(yil, m, d) + timedelta(days=gecikme) <= bugun:
+                return yil, p
+    return bugun.year - 1, 12
+
+
+def _prev_q(y: int, p: int) -> Tuple[int, int]:
+    return (y, p - 3) if p > 3 else (y - 1, 12)
+
+
+def _donem_str(y: int, p: int) -> str:
+    return f"{y}/{p:02d}"
+
+
+def _donem_var_mi(sess: requests.Session, V, code: str, y: int, p: int, gruplar=("XI_29", "UFRS_K", "UFRS")) -> Optional[str]:
+    """Dönem İş Yatırım'da dolu mu? Doluysa bulunan finansal grup kodunu döndürür; yoksa None."""
+    qs = [(y, p)]
+    for _ in range(3):
+        qs.append(_prev_q(*qs[-1]))
+    for g in gruplar:
+        url = V.FIN_URL_TMPL.replace("financialGroup=XI_29", f"financialGroup={g}").format(
+            code=code, y1=qs[0][0], p1=qs[0][1], y2=qs[1][0], p2=qs[1][1],
+            y3=qs[2][0], p3=qs[2][1], y4=qs[3][0], p4=qs[3][1])
+        r = sess.get(url, headers=V.HEAD, timeout=30)
+        r.raise_for_status()
+        rows = r.json().get("value") or []
+        if sum(1 for it in rows if pd.notna(V.num(it.get("value1")))) >= 10:
+            return g
+    return None
+
+
+def _kap_finansal_rapor(sess: requests.Session, V, gun: int = 3) -> List[dict]:
+    try:
+        df, _note = V.fetch_kap_disclosures_recent(sess, days=gun)
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for _, r in df.iterrows():
+        if r.get("Kaynak") == "UYARI" or not r.get("Hisse"):
+            continue
+        if "finansal rapor" in _fold(r.get("Başlık")):
+            out.append({"kod": str(r["Hisse"]).upper(), "tarih": str(r.get("Tarih") or ""),
+                        "url": r.get("URL") or "", "kap": str(r.get("KAP Index") or ""), "baslik": r.get("Başlık")})
+    return out
+
+
+def guncelle_bilanco(workers: int = 12, evren: Optional[List[str]] = None) -> dict:
+    V = _vbist()
+    sess = requests.Session()
+    st_ = load("bilanco")
+    durum: Dict[str, dict] = st_.get("durum") or {}
+    yeni: List[dict] = st_.get("yeni") or []
+    ilk = not durum
+    bugun = now().date()
+    y, p = son_biten_donem(bugun)
+    donem = _donem_str(y, p)
+    bitis = {3: (3, 31), 6: (6, 30), 9: (9, 30), 12: (12, 31)}[p]
+    pencere_icinde = bugun <= date(y, *bitis) + timedelta(days=85)
+
+    if evren is None:
+        evren = [r["kod"] for r in (load("hisse").get("kayitlar") or [])]
+        if not evren:
+            evren, _ = bist_evren()
+    kap = _kap_finansal_rapor(sess, V)
+    kap_kodlar = {k["kod"] for k in kap}
+
+    # Yoklanacak hisseler: bu dönemi henüz kaydetmemiş olanlar (pencere içinde) + KAP'ta görünenler
+    aday = [k for k in evren if (durum.get(k, {}).get("son") or "") < donem and (pencere_icinde or k in kap_kodlar)]
+    for k in kap_kodlar:
+        if k not in aday and (durum.get(k, {}).get("son") or "") < donem:
+            aday.append(k)
+    _STATE.update(part="bilanço", done=0, total=len(aday))
+
+    def work(code):
+        gr = durum.get(code, {}).get("grup")
+        return code, _donem_var_mi(sess, V, code, y, p, gruplar=(gr,) if gr else ("XI_29", "UFRS_K", "UFRS"))
+
+    bulunan, hata = [], 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for f in as_completed([ex.submit(work, c) for c in aday]):
+            _STATE["done"] += 1
+            try:
+                code, grup = f.result()
+            except Exception:  # noqa: BLE001
+                hata += 1
+                continue
+            if grup:
+                bulunan.append((code, grup))
+    if aday and hata == len(aday):
+        raise RuntimeError("İş Yatırım MaliTablo erişilemedi (tüm yoklamalar hata verdi).")
+
+    simdi = _iso()
+    for code, grup in bulunan:
+        onceki = durum.get(code, {}).get("son")
+        durum[code] = {"son": donem, "grup": grup, "tespit": simdi}
+        if ilk or onceki is None:
+            continue   # ilk kurulumda / evrene yeni giren hissede mevcut durumu kaydet, "yeni" sayma
+        mevcut = next((e for e in yeni if e["kod"] == code and not e.get("donem")), None)
+        if mevcut:
+            mevcut.update(donem=donem, tespit=simdi, kaynak=mevcut["kaynak"] + " + İş Yatırım")
+        else:
+            yeni.append({"kod": code, "donem": donem, "onceki": onceki, "tespit": simdi, "kaynak": "İş Yatırım"})
+    # Bulunamayanlar için "önceki dönem" varsayımı (ilk çalıştırmada yeni tespit edilebilsin)
+    if ilk:
+        for k in evren:
+            durum.setdefault(k, {"son": _donem_str(*_prev_q(y, p)), "grup": None, "tespit": None})
+
+    # KAP bildirimleri (bilgi amaçlı; İş Yatırım henüz yansıtmamış olabilir)
+    for k in kap:
+        if any(e.get("kap") == k["kap"] and k["kap"] for e in yeni):
+            continue
+        var = next((e for e in yeni if e["kod"] == k["kod"] and _gun_farki(e.get("tespit")) <= 10), None)
+        if var:
+            var.update(kap=k["kap"], url=k["url"])
+            continue
+        yeni.append({"kod": k["kod"], "donem": "", "onceki": durum.get(k["kod"], {}).get("son"), "tespit": simdi,
+                     "kaynak": "KAP", "url": k["url"], "kap": k["kap"], "kap_tarih": k["tarih"]})
+
+    esik = (now() - timedelta(days=45)).strftime("%Y-%m-%d")
+    yeni = sorted([e for e in yeni if (e.get("tespit") or "")[:10] >= esik], key=lambda e: e.get("tespit") or "", reverse=True)
+    obj = {"guncelleme": _iso(), "aranan_donem": donem, "pencere": pencere_icinde, "yoklanan": len(aday),
+           "yeni_bulunan": 0 if ilk else len(bulunan), "ilk_kurulum": ilk, "durum": durum, "yeni": yeni}
+    save("bilanco", obj)
+    return obj
+
+
+def _gun_farki(iso: Optional[str]) -> float:
+    d = _parse(iso)
+    return 999.0 if not d else (now() - d).total_seconds() / 86400
+
+
+# ── Değerleme yenileme ──────────────────────────────────────────────────────
+def son_rapor_zamani() -> Optional[datetime]:
+    try:
+        import tefas_bist as B
+        r = B.list_reports()
+        if r:
+            return datetime.fromtimestamp(r[0].stat().st_mtime, TZ)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def bekleyen_degerleme() -> List[dict]:
+    """Son BIST değerleme raporundan SONRA bilançosu gelen şirketler."""
+    yeni = (load("bilanco").get("yeni") or [])
+    rz = son_rapor_zamani()
+    if rz is None:
+        return yeni
+    return [e for e in yeni if (_parse(e.get("tespit")) or rz) > rz]
+
+
+def degerleme_baslat(wait: bool = False) -> Optional[dict]:
+    """vbist_degerleme motorunu (ayrı süreçte) yeniden çalıştırır."""
+    import tefas_bist as B
+    B.OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out = B.OUT_DIR / f"BIST_Degerleme_{now():%Y%m%d_%H%M}.xlsx"
+    run = B.start_run(B.build_command({}, out, "", "", False, False), out)
+    if wait:
+        while run["rc"] is None:
+            time.sleep(5)
+    return run
+
+
+def ayarlar() -> dict:
+    return {"auto_degerleme": False, "min_yeni": 3, **load("ayarlar")}
+
+
+# ── Orkestrasyon ────────────────────────────────────────────────────────────
+def refresh_all(parts=("hisse", "bilanco", "fon"), wait_degerleme: bool = False, auto_degerleme: Optional[bool] = None) -> dict:
+    if not _RUN_LOCK.acquire(blocking=False):
+        return {"hata": "Güncelleme zaten çalışıyor."}
+    try:
+        _STATE["running"] = True
+        meta = load("meta")
+        meta["son_deneme"] = _iso()
+        save("meta", meta)
+        hatalar, basarili = {}, []
+        for part in parts:
+            try:
+                {"fon": guncelle_fonlar, "hisse": guncelle_hisseler, "bilanco": guncelle_bilanco}[part]()
+                basarili.append(part)
+            except Exception as e:  # noqa: BLE001
+                hatalar[part] = f"{type(e).__name__}: {e}"[:300]
+        meta = load("meta")
+        meta["hatalar"] = hatalar
+        meta["parcalar"] = {**(meta.get("parcalar") or {}), **{p: _iso() for p in basarili}}
+        if basarili:
+            meta["son_guncelleme"] = _iso()
+        ay = ayarlar()
+        otomatik = ay["auto_degerleme"] if auto_degerleme is None else auto_degerleme
+        if otomatik and "bilanco" in basarili:
+            bek = bekleyen_degerleme()
+            son = _parse(meta.get("degerleme_baslangic"))
+            if len(bek) >= int(ay["min_yeni"]) and (son is None or (now() - son) > timedelta(hours=20)):
+                try:
+                    run = degerleme_baslat(wait=wait_degerleme)
+                    meta["degerleme_baslangic"] = _iso()
+                    meta["degerleme_cikti"] = run["output"]
+                except Exception as e:  # noqa: BLE001
+                    hatalar["degerleme"] = f"{type(e).__name__}: {e}"[:300]
+        save("meta", meta)
+        return meta
+    finally:
+        _STATE.update(running=False, part="", done=0, total=0)
+        _RUN_LOCK.release()
+
+
+def arka_planda_baslat(parts=("hisse", "bilanco", "fon")) -> bool:
+    if _STATE["running"]:
+        return False
+    threading.Thread(target=refresh_all, kwargs={"parts": parts}, daemon=True, name="panel-refresh").start()
+    return True
+
+
+# ── Arayüz ──────────────────────────────────────────────────────────────────
+def _renkle(df: pd.DataFrame, kolon: str):
+    def f(v):
+        try:
+            return "color:#34d399" if float(v) > 0 else ("color:#f87171" if float(v) < 0 else "")
+        except (TypeError, ValueError):
+            return ""
+    sty = df.style.format({kolon: "{:+.2f}"}, na_rep="—")
+    return (getattr(sty, "map", None) or sty.applymap)(f, subset=[kolon])
+
+
+def _liste(kayitlar: List[dict], anahtar: str, n: int, yukari: bool, min_ciro: float = 0.0, cap: float = 0.0) -> pd.DataFrame:
+    df = pd.DataFrame(kayitlar)
+    if df.empty or anahtar not in df.columns:
+        return pd.DataFrame()
+    df = df.dropna(subset=[anahtar])
+    if min_ciro and "ciro" in df.columns:
+        df = df[df["ciro"].fillna(0) >= min_ciro]
+    if cap:
+        df = df[df[anahtar].abs() <= cap]
+    df = df.sort_values(anahtar, ascending=not yukari).head(n)
+    return df
+
+
+def render_ana_panel(*, key: str = "panel") -> None:
+    """Ön sayfa paneli. Hata olursa ana sayfayı bozmaz."""
+    import streamlit as st
+
+    try:
+        _render(st, key)
+    except Exception as e:  # noqa: BLE001
+        st.warning(f"Piyasa paneli yüklenemedi: {type(e).__name__}: {e}")
+
+
+def _scheduler():
+    import streamlit as st
+
+    @st.cache_resource
+    def _start():
+        def loop():
+            while True:
+                try:
+                    if not _STATE["running"] and due(load("meta")):
+                        refresh_all()
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(900)
+        t = threading.Thread(target=loop, daemon=True, name="panel-scheduler")
+        t.start()
+        return t
+
+    return _start()
+
+
+def _render(st, key: str) -> None:
+    _scheduler()
+    S = st.session_state
+    meta, fon, his, bil = load("meta"), load("fon"), load("hisse"), load("bilanco")
+    ay = ayarlar()
+
+    # Başlık + durum
+    h1, h2 = st.columns([4, 1])
+    h1.subheader("📊 Piyasa Paneli")
+    son = meta.get("son_guncelleme")
+
+    def _durum():
+        if _STATE["running"]:
+            d, t = _STATE["done"], _STATE["total"]
+            st.progress(d / t if t else 0.0, text=f"Güncelleniyor: {_STATE['part']} {d}/{t or '?'}")
+        else:
+            if S.get(f"{key}_was_running"):
+                S[f"{key}_was_running"] = False
+                st.rerun()
+        S[f"{key}_was_running"] = bool(_STATE["running"])
+
+    if h2.button("🔄 Şimdi güncelle", key=f"{key}_refresh", disabled=_STATE["running"], use_container_width=True):
+        arka_planda_baslat()
+        st.rerun()
+    if hasattr(st, "fragment"):
+        st.fragment(run_every=3 if _STATE["running"] else None)(_durum)()
+    else:
+        _durum()
+    cap = f"Son güncelleme: **{son or 'henüz yok'}** (TSİ)"
+    if his.get("veri_tarihi"):
+        cap += f" · hisse verisi {his['veri_tarihi']}"
+    if fon.get("veri_tarihi"):
+        cap += f" · fon verisi {fon['veri_tarihi']}"
+    st.caption(cap + " · her hafta içi gün 10:30 ve 19:00'da otomatik yenilenir.")
+    for part, msg in (meta.get("hatalar") or {}).items():
+        st.warning(f"{part} güncellenemedi: {msg} — son başarılı veri gösteriliyor.")
+    if not (fon or his or bil):
+        st.info("Henüz veri yok. İlk güncelleme arka planda başlatılır; birkaç dakika sonra sayfayı yenileyin "
+                "veya '🔄 Şimdi güncelle'ye basın.")
+        return
+
+    # Özet kutuları
+    hk = pd.DataFrame(his.get("kayitlar") or [])
+    fk = pd.DataFrame(fon.get("kayitlar") or [])
+    bek = bekleyen_degerleme() if bil else []
+    c1, c2, c3, c4 = st.columns(4)
+    if not hk.empty:
+        c1.metric("BIST yükselen / düşen", f"{int((hk['g1'] > 0).sum())} / {int((hk['g1'] < 0).sum())}",
+                  f"ort. %{hk['g1'].mean():+.2f}")
+    if not fk.empty:
+        c2.metric("Fon medyan günlük", f"%{fk['g1'].median():+.2f}", f"{int((fk['g1'] > 0).sum())} fon yükseldi")
+    c3.metric("Yeni bilanço (45 gün)", len(bil.get("yeni") or []))
+    c4.metric("Değerlemesi bekleyen", len(bek))
+
+    t_bil, t_his, t_fon = st.tabs(["🆕 Yeni bilançolar", "📈 Hisseler", "💰 Fonlar"])
+
+    # Yeni bilançolar
+    with t_bil:
+        yeni = bil.get("yeni") or []
+        if bil.get("ilk_kurulum"):
+            st.info("İlk kurulum tamamlandı: mevcut bilanço durumu kaydedildi. Bundan sonra gelen yeni bilançolar burada listelenir.")
+        if not yeni:
+            st.write("Son 45 günde tespit edilen yeni bilanço yok."
+                     + (f" (Aranan dönem: {bil.get('aranan_donem')}, yoklanan hisse: {bil.get('yoklanan')})" if bil else ""))
+        else:
+            rap = {}
+            try:
+                import tefas_bist as B
+                rl = B.list_reports()
+                if rl:
+                    rap = st.cache_data(show_spinner=False)(_rapor_ozet)(str(rl[0]), rl[0].stat().st_mtime)
+            except Exception:  # noqa: BLE001
+                rap = {}
+            rows = []
+            rz = son_rapor_zamani()
+            for e in yeni:
+                r = rap.get(e["kod"], {})
+                bekler = (rz is None) or ((_parse(e.get("tespit")) or rz) > rz)
+                rows.append({"Hisse": e["kod"], "Dönem": e.get("donem") or "—", "Tespit": e.get("tespit"),
+                             "Kaynak": e.get("kaynak"), "Değerleme": "⏳ yenilenmeli" if bekler else "✅ güncel",
+                             "Final Score": r.get("Final Score"), "Adil Değer Marjı %": r.get("adil"),
+                             "Kova": r.get("Kova"), "KAP": e.get("url") or ""})
+            df = pd.DataFrame(rows)
+            st.dataframe(df, hide_index=True, use_container_width=True,
+                         column_config={"KAP": st.column_config.LinkColumn("KAP", display_text="aç")}
+                         if hasattr(st, "column_config") else None)
+        a1, a2 = st.columns([2, 3])
+        if a1.button("♻️ Yeni bilançoları değerlemeye yansıt", key=f"{key}_deger", disabled=not bek,
+                     help="BIST değerleme motorunu yeniden çalıştırır (tüm evreni baştan hesaplar; uzun sürer)."):
+            try:
+                S["bist_run"] = degerleme_baslat()
+                st.success("Değerleme başlatıldı. İlerlemeyi 🏦 BIST Değerleme → Çalıştır sekmesinden izleyin.")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Başlatılamadı: {e}")
+        with a2.expander("Otomatik değerleme yenileme"):
+            oto = st.checkbox("Yeni bilanço gelince değerlemeyi kendiliğinden yenile (en fazla 20 saatte bir)",
+                              value=bool(ay["auto_degerleme"]), key=f"{key}_oto")
+            mn = st.number_input("En az kaç şirketin bilançosu gelince?", 1, 50, int(ay["min_yeni"]), key=f"{key}_min")
+            if (oto, int(mn)) != (bool(ay["auto_degerleme"]), int(ay["min_yeni"])):
+                save("ayarlar", {"auto_degerleme": bool(oto), "min_yeni": int(mn)})
+                st.caption("Ayar kaydedildi.")
+            st.caption("Motor tüm BIST'i yeniden tarar. Streamlit Cloud gibi kısıtlı ortamlarda değil, kendi bilgisayarında/sunucunda "
+                       "çalışan kurulumda kullanın.")
+
+    # Hisseler
+    with t_his:
+        if hk.empty:
+            st.info("Hisse verisi yok.")
+        else:
+            p, m, n = st.columns([2, 2, 1])
+            per = p.radio("Dönem", ["Günlük", "Haftalık", "Aylık"], horizontal=True, key=f"{key}_hp")
+            ciro = m.number_input("Min. ort. günlük ciro (milyon TL)", 0.0, 10000.0, 5.0, 1.0, key=f"{key}_hciro",
+                                  help="Düşük hacimli hisselerin gürültüsünü ele (son 20 gün ort. fiyat×hacim).")
+            nn = n.number_input("Kaç satır", 5, 30, 10, key=f"{key}_hn")
+            ak = {"Günlük": "g1", "Haftalık": "h1", "Aylık": "a1"}[per]
+            yenikodlar = {e["kod"] for e in (bil.get("yeni") or [])}
+            ca, cb = st.columns(2)
+            for col, yukari, baslik in ((ca, True, "🟢 En çok artan"), (cb, False, "🔴 En çok düşen")):
+                with col:
+                    st.markdown(f"**{baslik}**")
+                    d = _liste(his["kayitlar"], ak, int(nn), yukari, min_ciro=ciro * 1e6)
+                    if d.empty:
+                        st.caption("Veri yok.")
+                        continue
+                    v = pd.DataFrame({"Hisse": [("🆕 " if k in yenikodlar else "") + k for k in d["kod"]],
+                                      "Fiyat": d["fiyat"].round(2).values, "Değişim %": d[ak].values,
+                                      "Ciro (mn ₺)": (d["ciro"] / 1e6).round(1).values if "ciro" in d else None})
+                    st.dataframe(_renkle(v, "Değişim %"), hide_index=True, use_container_width=True)
+            st.caption("🆕 = son 45 günde yeni bilançosu gelen şirket. Yatırım tavsiyesi değildir.")
+
+    # Fonlar
+    with t_fon:
+        if fk.empty:
+            st.info("Fon verisi yok.")
+        else:
+            p, m, n = st.columns([2, 2, 1])
+            per = p.radio("Dönem", ["Günlük", "Haftalık", "Aylık"], horizontal=True, key=f"{key}_fp")
+            gizle = m.checkbox("Aykırı değerleri gizle", value=True, key=f"{key}_fcap",
+                               help="Günlük ±25%, haftalık ±50%, aylık ±100% dışı (çoğunlukla veri hatası/ilk fiyat).")
+            nn = n.number_input("Kaç satır", 5, 30, 10, key=f"{key}_fn")
+            ak = {"Günlük": "g1", "Haftalık": "h1", "Aylık": "a1"}[per]
+            capv = {"g1": 25.0, "h1": 50.0, "a1": 100.0}[ak] if gizle else 0.0
+            ca, cb = st.columns(2)
+            for col, yukari, baslik in ((ca, True, "🟢 En çok artan"), (cb, False, "🔴 En çok düşen")):
+                with col:
+                    st.markdown(f"**{baslik}**")
+                    d = _liste(fon["kayitlar"], ak, int(nn), yukari, cap=capv)
+                    if d.empty:
+                        st.caption("Veri yok.")
+                        continue
+                    v = pd.DataFrame({"Fon": d["kod"].values, "Ad": d["ad"].str.slice(0, 38).values,
+                                      "Değişim %": d[ak].values, "Tarih": d["tarih"].values})
+                    st.dataframe(_renkle(v, "Değişim %"), hide_index=True, use_container_width=True)
+            st.caption(f"{fon.get('taranan', '?')} fon tarandı; fon fiyatları genellikle ertesi sabah netleşir. "
+                       "Yatırım tavsiyesi değildir.")
+
+
+def _rapor_ozet(path: str, mtime: float) -> Dict[str, dict]:
+    """Son BIST raporundan hisse → skor özeti (Yeni bilançolar tablosunu zenginleştirir)."""
+    try:
+        import tefas_bist as B
+        xl = pd.ExcelFile(path)
+        sh = "Değerleme Özeti" if "Değerleme Özeti" in xl.sheet_names else ("Ana Sıralama" if "Ana Sıralama" in xl.sheet_names else None)
+        if not sh:
+            return {}
+        df = xl.parse(sh)
+        out = {}
+        for _, x in df.iterrows():
+            k = str(x.get("Hisse", "")).upper()
+            adil = x.get("Adil Değer Marjı")
+            out[k] = {"Final Score": x.get("Final Score"), "Kova": x.get("Kova"),
+                      "adil": None if pd.isna(adil) else round(float(adil) * 100, 1)}
+        return out
+    except Exception:  # noqa: BLE001
+        return {}
