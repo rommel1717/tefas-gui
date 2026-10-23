@@ -803,12 +803,9 @@ if sayfa == "🏠 Ana Sayfa":
 """,
         unsafe_allow_html=True,
     )
-unsafe_allow_html=True,
-    )
 
-    tefas_panel.render_ana_panel()      # ← eklenecek satır
+    tefas_panel.render_ana_panel()
 
-    sepet_n = len(st.session_state.get("portfoy_sepet") or [])
     sepet_n = len(st.session_state.get("portfoy_sepet") or [])
     sa = st.session_state.get("sepet_analiz") or {}
     c1, c2, c3, c4, c5 = st.columns(5)
