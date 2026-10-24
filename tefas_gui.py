@@ -1542,106 +1542,253 @@ sayfa = st.session_state.get("sayfa", SAYFA_LISTESI[0])
 # ANA SAYFA
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _fon_movers_df(top_n: int = 10) -> tuple[pd.DataFrame, pd.DataFrame, str]:
-    """
-    Fon en çok artan / düşen.
-    Öncelik: 1g değişim → 1h → 1a → tarama getiri_1a.
-    Döner: (artan_df, dusen_df, kaynak_etiket)
-    """
-    rows = []
-    kaynak = "yok"
 
-    # 1) core TEFAS günlük / özet
+def tefas_fon_gunluk_getiriler(top_n: int = 15) -> tuple[pd.DataFrame, str]:
+    """
+    TEFAS kaynaklı fon günlük getirileri.
+    İş Yatırım kullanılmaz. Sıra: core → analiz.api → TEFAS HTTP → boş.
+    """
+    import urllib.request
+    import urllib.parse
+    import json as _json
+
+    def _norm_df(df: pd.DataFrame, kaynak: str) -> pd.DataFrame | None:
+        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+            return None
+        work = df.copy()
+        colmap = {}
+        for c in work.columns:
+            cl = str(c).lower().replace(" ", "").replace("_", "")
+            if cl in ("kod", "fonkod", "fonkodu", "code", "fonkodu"):
+                colmap[c] = "kod"
+            elif cl in ("ad", "fonad", "fonadi", "unvan", "title", "name", "fonunvan"):
+                colmap[c] = "ad"
+            elif any(x in cl for x in ("gunlukgetiri", "getiri1g", "dailyreturn", "gunluk", "degisim1g", "1g")):
+                colmap[c] = "degisim"
+            elif cl in ("getiri", "return", "degisim", "pct"):
+                if "degisim" not in colmap.values():
+                    colmap[c] = "degisim"
+            elif "kategori" in cl or "fontur" in cl:
+                colmap[c] = "kategori"
+            elif "kurucu" in cl or "founder" in cl:
+                colmap[c] = "kurucu"
+            elif "fiyat" in cl or "price" in cl or "nav" in cl:
+                colmap[c] = "fiyat"
+        work = work.rename(columns=colmap)
+        if "kod" not in work.columns:
+            return None
+        if "degisim" not in work.columns:
+            return None
+        work["kod"] = work["kod"].astype(str).str.strip().str.upper()
+        work["degisim"] = pd.to_numeric(work["degisim"], errors="coerce")
+        # TEFAS bazen 0.10 (% değil oran) döner
+        med = work["degisim"].abs().median()
+        if pd.notna(med) and 0 < med < 0.5:
+            work["degisim"] = work["degisim"] * 100.0
+        work = work.dropna(subset=["degisim"])
+        work = work[(work["degisim"] > -25) & (work["degisim"] < 25)]
+        work = work.drop_duplicates("kod", keep="first")
+        if work.empty:
+            return None
+        work.attrs["kaynak"] = kaynak
+        return work
+
+    # ── 1) core TEFAS fonksiyonları ───────────────────────────────────────
     for fn_name in (
-        "tefas_gunluk_degisim", "fon_gunluk_getiriler", "tum_fon_gunluk",
-        "tefas_performans_ozet", "fon_listesi_getiri",
+        "tefas_gunluk_degisim",
+        "fon_gunluk_getiriler",
+        "tum_fon_gunluk",
+        "tefas_performans_ozet",
+        "fon_listesi_getiri",
+        "tefas_en_cok_kazandiran",
+        "bind_comparison_returns",
     ):
         fn = getattr(core, fn_name, None)
         if not callable(fn):
             continue
         try:
             data = fn()
-            if data is None:
-                continue
-            if isinstance(data, pd.DataFrame) and not data.empty:
-                df = data.copy()
-            elif isinstance(data, list) and data:
-                df = pd.DataFrame(data)
+            if isinstance(data, pd.DataFrame):
+                d = _norm_df(data, f"core.{fn_name}")
             elif isinstance(data, dict):
-                df = pd.DataFrame(data.get("rows") or data.get("data") or [])
+                d = _norm_df(pd.DataFrame(data.get("rows") or data.get("data") or data.get("value") or []), f"core.{fn_name}")
+            elif isinstance(data, list):
+                d = _norm_df(pd.DataFrame(data), f"core.{fn_name}")
             else:
-                continue
-            if df.empty:
-                continue
-            # normalize columns
-            colmap = {}
-            for c in df.columns:
-                cl = str(c).lower()
-                if cl in ("kod", "fonkod", "fon_kodu", "code"):
-                    colmap[c] = "kod"
-                elif cl in ("ad", "fonad", "fon_adi", "name"):
-                    colmap[c] = "ad"
-                elif any(x in cl for x in ("1g", "gunluk", "daily", "degisim", "getiri1g", "getiri_1g")):
-                    colmap[c] = "degisim"
-                elif "1h" in cl or "hafta" in cl:
-                    colmap[c] = "degisim_1h"
-                elif "1a" in cl or "aylik" in cl or "getiri_1a" in cl:
-                    colmap[c] = "degisim_1a"
-            df = df.rename(columns=colmap)
-            if "degisim" not in df.columns:
-                for alt in ("degisim_1h", "degisim_1a", "getiri_1a", "getiri"):
-                    if alt in df.columns:
-                        df["degisim"] = pd.to_numeric(df[alt], errors="coerce")
-                        kaynak = f"core.{fn_name} ({alt})"
-                        break
-            else:
-                df["degisim"] = pd.to_numeric(df["degisim"], errors="coerce")
-                kaynak = f"core.{fn_name} (1g)"
-            if "degisim" in df.columns and df["degisim"].notna().sum() >= 5:
-                if "kod" not in df.columns:
-                    continue
-                rows = df
-                break
+                d = None
+            if d is not None and len(d) >= 5:
+                return d, d.attrs.get("kaynak") or f"core.{fn_name}"
         except Exception:
             continue
 
-    # 2) Son tarama / sıralama session
-    if not isinstance(rows, pd.DataFrame) or rows.empty:
-        for key, label in (("son_tarama", "tarama"), ("son_siralama", "sıralama")):
-            df = st.session_state.get(key)
-            if df is None or not hasattr(df, "empty") or df.empty:
+    # ── 2) get_analiz().api (tefas_core motor) ────────────────────────────
+    try:
+        analiz = get_analiz()
+        api = getattr(analiz, "api", None)
+        for meth in ("gunluk_getiriler", "fon_getirileri", "comparison_returns", "bind_fund_returns", "tum_fonlar"):
+            fn = getattr(api, meth, None) if api is not None else None
+            if not callable(fn):
                 continue
-            work = df.copy()
-            metric = None
-            for c in ("getiri_1g", "getiri_1h", "getiri_1a", "getiri_3a", "getiri_1y"):
-                if c in work.columns and pd.to_numeric(work[c], errors="coerce").notna().sum() >= 5:
-                    metric = c
-                    break
-            if not metric:
+            try:
+                data = fn()
+                if isinstance(data, pd.DataFrame):
+                    d = _norm_df(data, f"analiz.api.{meth}")
+                elif isinstance(data, list):
+                    d = _norm_df(pd.DataFrame(data), f"analiz.api.{meth}")
+                else:
+                    d = None
+                if d is not None and len(d) >= 5:
+                    return d, d.attrs.get("kaynak")
+            except Exception:
                 continue
-            work["degisim"] = pd.to_numeric(work[metric], errors="coerce")
-            if "kod" not in work.columns:
-                continue
-            rows = work
-            kaynak = f"session {label} · {metric}"
-            break
+        # profil listesinden son 2 gün fiyat farkı (örneklem — yavaş olmasın)
+        try:
+            profil = getattr(analiz, "profil", None) or {}
+            if not profil and hasattr(analiz, "load_profil"):
+                profil = analiz.load_profil() or {}
+            codes = list(profil.keys())[:80] if isinstance(profil, dict) else []
+            rows = []
+            for kod in codes:
+                try:
+                    fd = analiz.api.fiyat(kod, periyod=1)  # ~1 ay
+                    if fd is None or getattr(fd, "empty", True):
+                        continue
+                    s = fd.sort_values("tarih") if "tarih" in fd.columns else fd
+                    px = s["fiyat"].astype(float) if "fiyat" in s.columns else None
+                    if px is None or len(px) < 2:
+                        continue
+                    pct = (float(px.iloc[-1]) / float(px.iloc[-2]) - 1.0) * 100.0
+                    ad = ""
+                    try:
+                        ad = (profil.get(kod) or {}).get("ad") or ""
+                    except Exception:
+                        pass
+                    rows.append({"kod": kod, "ad": ad, "degisim": pct, "fiyat": float(px.iloc[-1])})
+                except Exception:
+                    continue
+            d = _norm_df(pd.DataFrame(rows), "TEFAS api.fiyat (1g)")
+            if d is not None and len(d) >= 5:
+                return d, "TEFAS api.fiyat (1g)"
+        except Exception:
+            pass
+    except Exception:
+        pass
 
-    if not isinstance(rows, pd.DataFrame) or rows.empty:
-        return pd.DataFrame(), pd.DataFrame(), "Veri yok — tarama yapın veya TEFAS günlük API"
+    # ── 3) Resmi TEFAS HTTP (BindComparisonFundReturns — 1 gün) ───────────
+    def _tefas_post(path: str, payload: dict):
+        url = "https://www.tefas.gov.tr" + path
+        body = _json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; TEFAS-GUI/2.3)",
+                "Content-Type": "application/json; charset=UTF-8",
+                "Accept": "application/json, text/plain, */*",
+                "Origin": "https://www.tefas.gov.tr",
+                "Referer": "https://www.tefas.gov.tr/",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return _json.loads(resp.read().decode("utf-8", errors="replace"))
 
-    work = rows.copy()
-    work["degisim"] = pd.to_numeric(work["degisim"], errors="coerce")
-    work = work.dropna(subset=["degisim"])
-    # aşırı uç / hata filtre (tek günde ±80% şüpheli; 1a için ±200)
-    work = work[(work["degisim"] > -90) & (work["degisim"] < 200)]
-    if work.empty:
-        return pd.DataFrame(), pd.DataFrame(), kaynak + " (filtre sonrası boş)"
+    today = datetime.now()
+    # son iş gününe yakın aralık
+    for fontip in ("YAT", "EMK", ""):
+        payload = {
+            "calismatipi": "2",
+            "fontip": fontip,
+            "sfontur": "",
+            "kurucukod": "",
+            "fongrup": "",
+            "bastarih": (today.replace(day=1)).strftime("%d.%m.%Y") if False else (today - __import__("datetime").timedelta(days=10)).strftime("%d.%m.%Y"),
+            "bittarih": today.strftime("%d.%m.%Y"),
+            "fonturkod": "",
+            "fonunvan": "",
+            "strperiod": "1 gün",
+            "periodeks": "1",
+        }
+        # alternatif alan adları
+        payloads = [
+            payload,
+            {
+                "fontip": fontip or "YAT",
+                "sfontur": "",
+                "fonunvan": "",
+                "kurucukod": "",
+                "fongrup": "",
+                "bastarih": (today - __import__("datetime").timedelta(days=7)).strftime("%d.%m.%Y"),
+                "bittarih": today.strftime("%d.%m.%Y"),
+                "fonturkod": "",
+                "fonperiod": "1",
+                "strperiod": "1 gün",
+                "periodeks": "01",
+            },
+        ]
+        for pl in payloads:
+            for path in (
+                "/api/DB/BindComparisonFundReturns",
+                "/api/DB/BindFundReturns",
+                "/api/DB/BindComparisonFundInfo",
+            ):
+                try:
+                    raw = _tefas_post(path, pl)
+                    data = raw.get("data") or raw.get("Data") or raw.get("value") or raw
+                    if isinstance(data, str):
+                        try:
+                            data = _json.loads(data)
+                        except Exception:
+                            continue
+                    if not data:
+                        continue
+                    if isinstance(data, dict):
+                        data = data.get("data") or data.get("result") or []
+                    df = pd.DataFrame(data if isinstance(data, list) else [])
+                    if df.empty:
+                        continue
+                    d = _norm_df(df, f"TEFAS {path}")
+                    if d is not None and len(d) >= 5:
+                        return d, f"TEFAS HTTP {path}"
+                except Exception:
+                    continue
 
-    cols = [c for c in ("kod", "ad", "degisim", "kategori", "kurucu") if c in work.columns]
+    # ── 4) Son tarama (TEFAS taramasından gelmiş metrik — 1g yoksa 1a) ───
+    for key, label in (("son_tarama", "tarama"), ("son_siralama", "sıralama")):
+        df = st.session_state.get(key)
+        if df is None or not hasattr(df, "empty") or df.empty:
+            continue
+        work = df.copy()
+        metric = None
+        for c in ("getiri_1g", "getiri_1h", "getiri_1a"):
+            if c in work.columns and pd.to_numeric(work[c], errors="coerce").notna().sum() >= 5:
+                metric = c
+                break
+        if not metric:
+            continue
+        work["degisim"] = pd.to_numeric(work[metric], errors="coerce")
+        d = _norm_df(work, f"TEFAS session {label} · {metric}")
+        if d is not None and len(d) >= 3:
+            return d, d.attrs.get("kaynak")
+
+    return pd.DataFrame(), "TEFAS günlük veri yok"
+
+
+def _fon_movers_df(top_n: int = 10) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    """
+    Fon en çok artan / düşen — yalnızca TEFAS kaynaklı (İş Yatırım yok).
+    """
+    work, kaynak = tefas_fon_gunluk_getiriler(top_n=max(top_n * 3, 30))
+    if work is None or not isinstance(work, pd.DataFrame) or work.empty:
+        return (
+            pd.DataFrame(),
+            pd.DataFrame(),
+            kaynak or "TEFAS günlük getiri alınamadı — Fon Tarama çalıştırın",
+        )
+    cols = [c for c in ("kod", "ad", "degisim", "fiyat", "kategori", "kurucu") if c in work.columns]
     artan = work.nlargest(top_n, "degisim")[cols]
     dusen = work.nsmallest(top_n, "degisim")[cols]
     return artan, dusen, kaynak
-
 
 def _hisse_movers_df(top_n: int = 10) -> tuple[pd.DataFrame, pd.DataFrame, str]:
     """
@@ -1749,7 +1896,7 @@ def render_artan_dusen_paneli():
     """Ana Sayfa: fon + hisse en çok artan / düşen (doğru sıralama + filtre)."""
     st.subheader("📊 En çok artan / düşen")
     st.caption(
-        "Fon: TEFAS günlük değişim (yoksa son tarama 1A/1Y). "
+        "Fon: **yalnızca TEFAS** günlük getiri (core / api / tefas.gov.tr; İş Yatırım değil). "
         "Hisse: BIST günlük % (yfinance / core). Aşırı uçlar elenir."
     )
     c_refresh, _ = st.columns([1, 4])
