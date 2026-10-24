@@ -860,6 +860,161 @@ def model_sinyal_skoru(
     }
 
 
+
+
+def birlesik_profil_skoru(
+    kalite: dict | None = None,
+    sinyal: dict | None = None,
+    tu: dict | None = None,
+) -> dict:
+    """
+    Hazır profil birleşik skor — eşit ağırlık:
+      1) Bilanço kalite (0–100)
+      2) Model sinyal normalize (0–100)
+      3) Tarihsel ucuzluk (0–100)
+    Ortalama yüksek → düşük sıralanır. Yatırım tavsiyesi değildir.
+    """
+    kalite = kalite or {}
+    sinyal = sinyal or {}
+    tu = tu or {}
+
+    def _f(v):
+        try:
+            if v is None:
+                return None
+            x = float(v)
+            return x if x == x else None
+        except (TypeError, ValueError):
+            return None
+
+    k = _f(kalite.get("skor"))
+    s = _f(sinyal.get("skor"))
+    u = _f(tu.get("skor"))
+    # sinyal −100..100 → 0..100
+    s_n = None if s is None else max(0.0, min(100.0, (s + 100.0) / 2.0))
+    parts = []
+    labels = []
+    if k is not None:
+        parts.append(k)
+        labels.append("kalite")
+    if s_n is not None:
+        parts.append(s_n)
+        labels.append("sinyal")
+    if u is not None:
+        parts.append(u)
+        labels.append("ucuzluk")
+    # eşit ağırlık
+    n = len(parts)
+    ort = round(sum(parts) / n, 1) if n else None
+    agirlik = round(100.0 / n, 1) if n else None
+    if ort is None:
+        seviye = "—"
+    elif ort >= 70:
+        seviye = "Yüksek"
+    elif ort >= 45:
+        seviye = "Orta"
+    else:
+        seviye = "Düşük"
+    return {
+        "kalite": k,
+        "sinyal": s,
+        "sinyal_norm": round(s_n, 1) if s_n is not None else None,
+        "ucuzluk": u,
+        "ortalama": ort,
+        "seviye": seviye,
+        "bilesen_sayisi": n,
+        "esit_agirlik_%": agirlik,
+        "kullanilan": labels,
+        "not": (
+            f"Eşit ağırlık ({agirlik}% × {n} bileşen): "
+            f"kalite={k if k is not None else '—'}, "
+            f"sinyal_norm={round(s_n,1) if s_n is not None else '—'}, "
+            f"ucuzluk={u if u is not None else '—'}. "
+            f"Birleşik ortalama={ort if ort is not None else '—'}. "
+            "Sıralama yüksek → düşük. Yatırım tavsiyesi değildir."
+        ),
+    }
+
+
+# Geriye uyumluluk
+def birlesik_kalite_sinyal_skoru(kalite: dict | None, sinyal: dict | None, tu: dict | None = None) -> dict:
+    return birlesik_profil_skoru(kalite=kalite, sinyal=sinyal, tu=tu)
+
+
+def hisse_birlesik_satir(kod: str, *, force_isy: bool = False) -> dict:
+    """Tek hisse: kalite + sinyal + tarihsel ucuzluk + eşit ağırlıklı ortalama."""
+    kod = str(kod).upper().replace(".IS", "").strip()
+    row = {
+        "kod": kod, "ad": kod, "bilanco_donem": None,
+        "kalite_skor": None, "model_sinyal": None, "sinyal_norm": None,
+        "ucuzluk_skor": None, "birlesik_ortalama": None, "seviye": None,
+        "F/K": None, "PD/DD": None, "ROE": None, "getiri_1y": None,
+        "fiyat_persentil_1y": None,
+    }
+    deg, m = {}, {}
+    fd = None
+    try:
+        import yfinance as yf
+        t = yf.Ticker(f"{kod}.IS")
+        hist = t.history(period="3y", auto_adjust=True)
+        if hist is not None and not hist.empty:
+            hist2 = hist.reset_index()
+            dc = "Date" if "Date" in hist2.columns else hist2.columns[0]
+            fd = hist2.rename(columns={dc: "tarih", "Close": "fiyat"})[["tarih", "fiyat"]]
+            px = hist["Close"].dropna()
+            if len(px) > 2:
+                # 1Y getiri
+                px1 = px.tail(min(252, len(px)))
+                m["getiri_1y"] = float((px1.iloc[-1] / px1.iloc[0] - 1) * 100)
+                row["getiri_1y"] = m["getiri_1y"]
+            rets = px.pct_change().dropna()
+            if len(rets) > 10:
+                m["volatilite"] = float(rets.std() * (252 ** 0.5) * 100)
+                cum = (1 + rets).cumprod()
+                m["max_drawdown"] = float((cum / cum.cummax() - 1).min() * 100)
+        try:
+            info = dict(t.info or {})
+        except Exception:
+            info = {}
+        row["ad"] = (info.get("longName") or info.get("shortName") or kod)[:48]
+        deg["F/K"] = info.get("trailingPE")
+        deg["PD/DD"] = info.get("priceToBook")
+        row["F/K"] = deg["F/K"]
+        row["PD/DD"] = deg["PD/DD"]
+        if info.get("returnOnEquity") is not None:
+            row["ROE"] = float(info["returnOnEquity"]) * 100
+            deg["ROE"] = row["ROE"]
+    except Exception:
+        pass
+    isy = {}
+    try:
+        isy = isyatirim_mali_tablo(kod, force=force_isy)
+        if isy and not isy.get("error"):
+            row["bilanco_donem"] = isy.get("gunce_donem")
+            orans = isy.get("oranlar") or {}
+            if orans.get("ROE_%") is not None:
+                row["ROE"] = orans["ROE_%"]
+                deg["ROE"] = row["ROE"]
+    except Exception:
+        isy = {}
+    kal = bilanco_kalite_skoru(isy if isinstance(isy, dict) else {}, deg)
+    tu = tarihsel_ucuzluk_analizi(kod, fd=fd, deg=deg)
+    sig = model_sinyal_skoru(m=m, deg=deg, kalite=kal, tu=tu)
+    bir = birlesik_profil_skoru(kalite=kal, sinyal=sig, tu=tu)
+    row["kalite_skor"] = bir.get("kalite")
+    row["model_sinyal"] = bir.get("sinyal")
+    row["sinyal_norm"] = bir.get("sinyal_norm")
+    row["ucuzluk_skor"] = bir.get("ucuzluk")
+    row["fiyat_persentil_1y"] = tu.get("fiyat_persentil_1y")
+    row["birlesik_ortalama"] = bir.get("ortalama")
+    row["seviye"] = bir.get("seviye")
+    row["_kal"] = kal
+    row["_sig"] = sig
+    row["_tu"] = tu
+    row["_bir"] = bir
+    return row
+
+
 def rapor_paketi_html(
     *,
     baslik: str,
@@ -4106,6 +4261,51 @@ elif sayfa == "🧪 Filtre Stüdyosu":
         st.error(f"Filtre Stüdyosu yüklenemedi: {e}")
         st.caption("tefas_filtre modülünü kontrol edin.")
 
+    st.markdown("---")
+    st.markdown("### Hazır profil — birleşik skor (kalite + sinyal + ucuzluk, eşit ağırlık)")
+    st.caption(
+        "Kalite + model sinyal + **tarihsel ucuzluk** eşit ağırlıkla ortalanır; "
+        "en yüksekten en düşüğe sıralanır. Yatırım tavsiyesi değildir."
+    )
+    fs_list = st.text_input(
+        "Hisse kodları (virgülle) — hazır profil",
+        value="ISDMR,THYAO,GARAN,EREGL,ASELS,SISE,KCHOL,TUPRS",
+        key="fs_birlesik_list",
+    )
+    if st.button("Birleşik skor sırala (yüksek → düşük)", key="btn_fs_birlesik"):
+        kodlar = [k.strip().upper().replace(".IS", "") for k in fs_list.split(",") if k.strip()]
+        rows = []
+        bar = st.progress(0.0)
+        for i, k in enumerate(kodlar):
+            try:
+                rows.append(hisse_birlesik_satir(k))
+            except Exception as e:
+                rows.append({"kod": k, "ad": k, "birlesik_ortalama": None, "hata": str(e)})
+            bar.progress((i + 1) / max(len(kodlar), 1))
+        bar.empty()
+        dfb = pd.DataFrame(rows)
+        if "birlesik_ortalama" in dfb.columns:
+            dfb = dfb.sort_values("birlesik_ortalama", ascending=False, na_position="last")
+        st.session_state["fs_birlesik_df"] = dfb
+    dfb = st.session_state.get("fs_birlesik_df")
+    if dfb is not None and not getattr(dfb, "empty", True):
+        show_cols = [
+            c for c in (
+                "kod", "ad", "bilanco_donem", "kalite_skor", "model_sinyal",
+                "sinyal_norm", "ucuzluk_skor", "fiyat_persentil_1y",
+                "birlesik_ortalama", "seviye",
+                "F/K", "PD/DD", "ROE", "getiri_1y",
+            ) if c in dfb.columns
+        ]
+        show_df(dfb, show_cols, height=360)
+        download_excel_button(
+            dfb[show_cols] if show_cols else dfb,
+            f"filtre_birlesik_skor_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            meta={"mod": "birlesik_kalite_sinyal", "siralama": "yuksek_dusuk"},
+            key="xl_fs_birlesik",
+        )
+        st.caption("Sıra: birleşik ortalama yüksek → düşük.")
+
 elif sayfa == "⚖️ Karşılaştırma":
     st.header("⚖️ Karşılaştırma — Fon + Hisse")
     st.caption("Fon (TEFAS) ve hisse (BIST) yan yana; getiri, risk, çarpan, bilanço, kalite ve model sinyal.")
@@ -5416,6 +5616,50 @@ elif sayfa == "🏦 BIST Değerleme":
         for y in tu.get("yorum") or []:
             st.markdown(f"- {y}")
 
+    st.markdown("#### Hazır profil — birleşik skor (kalite + sinyal + ucuzluk, eşit ağırlık)")
+    st.caption(
+        "Kalite + model sinyal + tarihsel ucuzluk **eşit ağırlık** ortalaması; "
+        "**yüksekten düşüğe** sıralanır. BIST / Filtre Stüdyosu hazır profil mantığı."
+    )
+    bist_list = st.text_input(
+        "Profil hisse listesi",
+        value="ISDMR,THYAO,GARAN,EREGL,ASELS,SISE,KCHOL,TUPRS,BIMAS,SAHOL",
+        key="bist_birlesik_list",
+    )
+    if st.button("Birleşik skor sırala (yüksek → düşük)", key="btn_bist_birlesik"):
+        kodlar = [k.strip().upper().replace(".IS", "") for k in bist_list.split(",") if k.strip()]
+        rows = []
+        bar = st.progress(0.0)
+        for i, k in enumerate(kodlar):
+            try:
+                rows.append(hisse_birlesik_satir(k))
+            except Exception as e:
+                rows.append({"kod": k, "ad": k, "birlesik_ortalama": None, "hata": str(e)})
+            bar.progress((i + 1) / max(len(kodlar), 1))
+        bar.empty()
+        dfb = pd.DataFrame(rows)
+        if "birlesik_ortalama" in dfb.columns:
+            dfb = dfb.sort_values("birlesik_ortalama", ascending=False, na_position="last")
+        st.session_state["bist_birlesik_df"] = dfb
+    dfb = st.session_state.get("bist_birlesik_df")
+    if dfb is not None and not getattr(dfb, "empty", True):
+        show_cols = [
+            c for c in (
+                "kod", "ad", "bilanco_donem", "kalite_skor", "model_sinyal",
+                "sinyal_norm", "ucuzluk_skor", "fiyat_persentil_1y",
+                "birlesik_ortalama", "seviye",
+                "F/K", "PD/DD", "ROE", "getiri_1y",
+            ) if c in dfb.columns
+        ]
+        show_df(dfb, show_cols, height=360)
+        download_excel_button(
+            dfb[show_cols] if show_cols else dfb,
+            f"bist_birlesik_skor_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            meta={"mod": "bist_birlesik_profil", "siralama": "yuksek_dusuk"},
+            key="xl_bist_birlesik",
+        )
+        st.caption("1. satır = en yüksek birleşik ortalama; son satırlar daha düşük.")
+
     try:
         try:
             tefas_bist.render(
@@ -6687,6 +6931,24 @@ elif sayfa == "🔎 Hisse Detay":
                     ),
                     hide_index=True, use_container_width=True,
                 )
+
+            _tu2 = det.get("tarihsel_ucuzluk") or tarihsel_ucuzluk_analizi(
+                kod, fd=det.get("fiyat_df"), deg=deg
+            )
+            _bir = birlesik_profil_skoru(kalite=_kal, sinyal=_sig, tu=_tu2)
+            det["birlesik_skor"] = _bir
+            st.markdown("#### Birleşik skor (eşit ağırlık: kalite + sinyal + ucuzluk)")
+            st.info(_bir.get("not") or "")
+            b1, b2, b3, b4, b5 = st.columns(5)
+            b1.metric("Kalite", f"{_bir.get('kalite')}/100" if _bir.get("kalite") is not None else "—")
+            b2.metric("Sinyal (norm)", f"{_bir.get('sinyal_norm')}/100" if _bir.get("sinyal_norm") is not None else "—")
+            b3.metric("Ucuzluk", f"{_bir.get('ucuzluk')}/100" if _bir.get("ucuzluk") is not None else "—")
+            b4.metric("Ortalama", f"{_bir.get('ortalama')}/100" if _bir.get("ortalama") is not None else "—")
+            b5.metric("Seviye", _bir.get("seviye") or "—")
+            st.caption(
+                f"Her bileşen eşit ağırlık (~%{_bir.get('esit_agirlik_%') or '—'}). "
+                "Hazır profil sıralaması **ortalama yüksek → düşük**. Yatırım tavsiyesi değildir."
+            )
 
             st.markdown("#### Risk–getiri (sade dil)")
             try:
