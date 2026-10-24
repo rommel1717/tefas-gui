@@ -561,6 +561,112 @@ def _fmt_tl(v):
 fmt_tl = _fmt_tl
 
 
+
+def tarihsel_ucuzluk_analizi(sembol: str, fd: pd.DataFrame | None = None, deg: dict | None = None) -> dict:
+    """
+    Tarihsel ucuzluk (Filtre Stüdyosu / BIST Değerleme uyumu).
+    - Fiyat: 1Y ve 3Y persentil (0=en düşük fiyat=ucuz seviye, 100=zirve)
+    - F/K, PD/DD: mevcut çarpan + 52h fiyat konumuna göre yorum
+    Skor 0–100: yüksek = tarihsel olarak daha ucuz görünüm.
+    """
+    deg = deg or {}
+    out = {
+        "skor": None,
+        "fiyat_persentil_1y": None,
+        "fiyat_persentil_3y": None,
+        "fk": None,
+        "pddd": None,
+        "yorum": [],
+        "ucuz_mu": None,
+    }
+    try:
+        px = None
+        if fd is not None and not getattr(fd, "empty", True) and "fiyat" in fd.columns:
+            s = fd.copy()
+            if "tarih" in s.columns:
+                s["tarih"] = pd.to_datetime(s["tarih"])
+                s = s.sort_values("tarih")
+            px = pd.to_numeric(s["fiyat"], errors="coerce").dropna()
+        if px is None or len(px) < 30:
+            # yfinance dene
+            try:
+                import yfinance as yf
+                sym = sembol if str(sembol).endswith(".IS") else f"{str(sembol).upper().replace('.IS','')}.IS"
+                hist = yf.Ticker(sym).history(period="3y", auto_adjust=True)
+                if hist is not None and not hist.empty:
+                    px = hist["Close"].dropna()
+            except Exception:
+                pass
+        if px is None or len(px) < 20:
+            out["yorum"].append("Yetersiz fiyat serisi — tarihsel ucuzluk hesaplanamadı.")
+            return out
+
+        last = float(px.iloc[-1])
+
+        def _pct_rank(series):
+            if series is None or len(series) < 5:
+                return None
+            return float((series <= last).mean() * 100.0)
+
+        p1 = _pct_rank(px.tail(min(252, len(px))))
+        p3 = _pct_rank(px.tail(min(756, len(px))))
+        out["fiyat_persentil_1y"] = round(p1, 1) if p1 is not None else None
+        out["fiyat_persentil_3y"] = round(p3, 1) if p3 is not None else None
+
+        fk = deg.get("F/K")
+        pddd = deg.get("PD/DD")
+        try:
+            fk = float(fk) if fk is not None else None
+        except (TypeError, ValueError):
+            fk = None
+        try:
+            pddd = float(pddd) if pddd is not None else None
+        except (TypeError, ValueError):
+            pddd = None
+        out["fk"] = fk
+        out["pddd"] = pddd
+
+        # Skor: düşük persentil = ucuz fiyat seviyesi → yüksek skor
+        # F/K düşük ve PD/DD < 1 bonus
+        skor = 50.0
+        if p1 is not None:
+            skor = 100.0 - p1  # 0. persentil → 100 puan
+            out["yorum"].append(
+                f"1Y fiyat persentili **%{p1:.0f}** "
+                f"({'ucuz bölge' if p1 <= 30 else ('pahalı bölge' if p1 >= 70 else 'orta bant')})."
+            )
+        if p3 is not None:
+            out["yorum"].append(f"3Y fiyat persentili **%{p3:.0f}**.")
+            skor = 0.6 * skor + 0.4 * (100.0 - p3)
+        if fk is not None:
+            if fk < 8:
+                skor += 8
+                out["yorum"].append(f"F/K **{fk:.1f}** düşük çarpan (ucuzluk lehine).")
+            elif fk > 20:
+                skor -= 8
+                out["yorum"].append(f"F/K **{fk:.1f}** yüksek — tarihsel ucuz görünümü zayıflatır.")
+        if pddd is not None:
+            if pddd < 1:
+                skor += 6
+                out["yorum"].append(f"PD/DD **{pddd:.2f}** defter altı.")
+            elif pddd > 2.5:
+                skor -= 5
+                out["yorum"].append(f"PD/DD **{pddd:.2f}** primli.")
+
+        skor = max(0, min(100, round(skor, 1)))
+        out["skor"] = skor
+        out["ucuz_mu"] = bool(skor >= 60)
+        if skor >= 70:
+            out["yorum"].insert(0, f"**Tarihsel ucuzluk skoru: {skor}/100** — görece ucuz bölge.")
+        elif skor >= 40:
+            out["yorum"].insert(0, f"**Tarihsel ucuzluk skoru: {skor}/100** — nötr.")
+        else:
+            out["yorum"].insert(0, f"**Tarihsel ucuzluk skoru: {skor}/100** — pahalı / zirveye yakın seviye.")
+    except Exception as e:
+        out["yorum"].append(f"Hesap hatası: {e}")
+    return out
+
+
 # ── Bilanço bildirimleri (FON / HİSSE ayrı) ─────────────────────────────────
 def _bilanco_state_path() -> Path:
     try:
@@ -1641,34 +1747,97 @@ def tefas_fon_gunluk_getiriler(top_n: int = 15) -> tuple[pd.DataFrame, str]:
                     return d, d.attrs.get("kaynak")
             except Exception:
                 continue
-        # profil listesinden son 2 gün fiyat farkı (örneklem — yavaş olmasın)
+        # profil + bilinen kod listesinden son 2 NAV → günlük %
         try:
+            codes = []
             profil = getattr(analiz, "profil", None) or {}
-            if not profil and hasattr(analiz, "load_profil"):
-                profil = analiz.load_profil() or {}
-            codes = list(profil.keys())[:80] if isinstance(profil, dict) else []
-            rows = []
-            for kod in codes:
-                try:
-                    fd = analiz.api.fiyat(kod, periyod=1)  # ~1 ay
-                    if fd is None or getattr(fd, "empty", True):
-                        continue
-                    s = fd.sort_values("tarih") if "tarih" in fd.columns else fd
-                    px = s["fiyat"].astype(float) if "fiyat" in s.columns else None
-                    if px is None or len(px) < 2:
-                        continue
-                    pct = (float(px.iloc[-1]) / float(px.iloc[-2]) - 1.0) * 100.0
-                    ad = ""
+            if not profil:
+                for loader in ("load_profil", "profil_yukle", "get_profil"):
+                    fn = getattr(analiz, loader, None) or getattr(getattr(analiz, "api", None), loader, None)
+                    if callable(fn):
+                        try:
+                            profil = fn() or {}
+                            break
+                        except Exception:
+                            pass
+            if isinstance(profil, dict) and profil:
+                codes = list(profil.keys())
+            # core fon listesi
+            for fn_name in ("fon_kodlari", "tum_fon_kodlari", "list_fon_kod"):
+                fn = getattr(core, fn_name, None)
+                if callable(fn):
                     try:
-                        ad = (profil.get(kod) or {}).get("ad") or ""
+                        extra = fn()
+                        if isinstance(extra, (list, tuple, set)):
+                            codes = list(dict.fromkeys(list(codes) + [str(x).upper() for x in extra]))
+                        elif isinstance(extra, pd.DataFrame) and "kod" in extra.columns:
+                            codes = list(dict.fromkeys(list(codes) + extra["kod"].astype(str).str.upper().tolist()))
                     except Exception:
                         pass
-                    rows.append({"kod": kod, "ad": ad, "degisim": pct, "fiyat": float(px.iloc[-1])})
-                except Exception:
-                    continue
-            d = _norm_df(pd.DataFrame(rows), "TEFAS api.fiyat (1g)")
+            # session tarama kodları öncelikli
+            for key in ("son_tarama", "son_siralama"):
+                dfx = st.session_state.get(key)
+                if dfx is not None and hasattr(dfx, "columns") and "kod" in getattr(dfx, "columns", []):
+                    codes = list(dict.fromkeys(
+                        dfx["kod"].astype(str).str.upper().tolist() + list(codes)
+                    ))
+            codes = [c for c in codes if c and len(c) <= 5][:120]
+            rows = []
+            api = getattr(analiz, "api", None)
+            fiyat_fn = None
+            if api is not None:
+                for name in ("fiyat", "get_fiyat", "nav_series", "fon_fiyat"):
+                    if callable(getattr(api, name, None)):
+                        fiyat_fn = getattr(api, name)
+                        break
+            if fiyat_fn is None:
+                for name in ("fon_fiyat", "get_fiyat_df"):
+                    if callable(getattr(analiz, name, None)):
+                        fiyat_fn = getattr(analiz, name)
+                        break
+                    if callable(getattr(core, name, None)):
+                        fiyat_fn = getattr(core, name)
+                        break
+            if fiyat_fn is not None and codes:
+                for kod in codes:
+                    try:
+                        try:
+                            fd = fiyat_fn(kod, periyod=1)
+                        except TypeError:
+                            try:
+                                fd = fiyat_fn(kod)
+                            except Exception:
+                                continue
+                        if fd is None or getattr(fd, "empty", True):
+                            continue
+                        s = fd.copy()
+                        if "tarih" in s.columns:
+                            s = s.sort_values("tarih")
+                        pxcol = "fiyat" if "fiyat" in s.columns else (
+                            "Fiyat" if "Fiyat" in s.columns else (
+                                "close" if "close" in s.columns else None
+                            )
+                        )
+                        if not pxcol:
+                            continue
+                        px = pd.to_numeric(s[pxcol], errors="coerce").dropna()
+                        if len(px) < 2:
+                            continue
+                        last, prev = float(px.iloc[-1]), float(px.iloc[-2])
+                        if prev == 0:
+                            continue
+                        pct = (last / prev - 1.0) * 100.0
+                        ad = ""
+                        if isinstance(profil, dict):
+                            p = profil.get(kod) or profil.get(kod.lower()) or {}
+                            if isinstance(p, dict):
+                                ad = p.get("ad") or p.get("unvan") or ""
+                        rows.append({"kod": kod, "ad": ad, "degisim": pct, "fiyat": last})
+                    except Exception:
+                        continue
+            d = _norm_df(pd.DataFrame(rows), "TEFAS NAV son 2 gün")
             if d is not None and len(d) >= 5:
-                return d, "TEFAS api.fiyat (1g)"
+                return d, f"TEFAS NAV son 2 gün · {len(d)} fon"
         except Exception:
             pass
     except Exception:
@@ -4758,8 +4927,59 @@ elif sayfa == "🏦 BIST Değerleme":
         if _pi:
             st.caption(f"Son probe: {_pi.get('kod')} → **{_pi.get('donem')}**")
 
+    st.markdown("#### Tarihsel ucuzluk")
+    st.caption(
+        "Filtre Stüdyosu ile aynı mantık: 1Y/3Y fiyat persentili + F/K & PD/DD. "
+        "Yüksek skor = tarihsel olarak daha ucuz fiyat/çarpan bölgesi."
+    )
+    tu_kod = st.text_input("Hisse kodu (ucuzluk)", value="ISDMR", key="bist_tu_kod")
+    if st.button("Tarihsel ucuzluk hesapla", key="btn_bist_tu"):
+        kod_u = (tu_kod or "").strip().upper().replace(".IS", "")
+        with st.spinner(f"{kod_u}…"):
+            fd_u, info_u, err_u = None, {}, None
+            try:
+                # yfinance fiyat
+                import yfinance as yf
+                t = yf.Ticker(f"{kod_u}.IS")
+                hist = t.history(period="3y", auto_adjust=True)
+                if hist is not None and not hist.empty:
+                    hist = hist.reset_index()
+                    dc = "Date" if "Date" in hist.columns else hist.columns[0]
+                    fd_u = hist.rename(columns={dc: "tarih", "Close": "fiyat"})[["tarih", "fiyat"]]
+                try:
+                    info_u = dict(t.info or {})
+                except Exception:
+                    info_u = {}
+            except Exception as e:
+                err_u = str(e)
+            deg_u = {}
+            if info_u:
+                if info_u.get("trailingPE") is not None:
+                    deg_u["F/K"] = info_u.get("trailingPE")
+                if info_u.get("priceToBook") is not None:
+                    deg_u["PD/DD"] = info_u.get("priceToBook")
+            # İş Yatırım oranları varsa ekle
+            try:
+                isy_u = isyatirim_mali_tablo(kod_u)
+                if isy_u and not isy_u.get("error"):
+                    st.caption(f"Bilanço dönemi (İş Yatırım): **{isy_u.get('gunce_donem')}**")
+            except Exception:
+                pass
+            tu = tarihsel_ucuzluk_analizi(kod_u, fd=fd_u, deg=deg_u)
+            st.session_state["_bist_tu"] = tu
+            if err_u and tu.get("skor") is None:
+                st.warning(err_u)
+    tu = st.session_state.get("_bist_tu")
+    if tu:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Ucuzluk skoru", f"{tu.get('skor')}/100" if tu.get("skor") is not None else "—")
+        c2.metric("1Y fiyat %ile", f"%{tu.get('fiyat_persentil_1y')}" if tu.get("fiyat_persentil_1y") is not None else "—")
+        c3.metric("3Y fiyat %ile", f"%{tu.get('fiyat_persentil_3y')}" if tu.get("fiyat_persentil_3y") is not None else "—")
+        c4.metric("Ucuz mu?", "Evet" if tu.get("ucuz_mu") else ("Hayır" if tu.get("ucuz_mu") is False else "—"))
+        for y in tu.get("yorum") or []:
+            st.markdown(f"- {y}")
+
     try:
-        # Dönem bilgisini render'a keyword ile de dene
         try:
             tefas_bist.render(
                 show_df=show_df,
@@ -4774,8 +4994,8 @@ elif sayfa == "🏦 BIST Değerleme":
         st.error(f"BIST Değerleme yüklenemedi: {e}")
         st.caption("tefas_bist modülünü kontrol edin.")
         st.info(
-            "Tek hisse için güncel bilanço + SWOT: **🔎 Hisse Detay** sayfasını kullanın "
-            "(İş Yatırım MaliTablo, örn. ISDMR → 2026/9)."
+            "Tek hisse için güncel bilanço + SWOT: **🔎 Hisse Detay** "
+            "(İş Yatırım, örn. ISDMR → 2026/9)."
         )
 
 elif sayfa == "🔎 Hisse Detay":
@@ -5815,6 +6035,17 @@ elif sayfa == "🔎 Hisse Detay":
             s3.metric("F/K", fmt_num((_tem.get("carpanlar") or {}).get("F/K"), 1))
             st.markdown(f"**{_tem.get('skor_yorum')}**")
             for n in _tem.get("notlar") or []:
+                st.markdown(f"- {n}")
+            # Tarihsel ucuzluk (Filtre Stüdyosu ile uyumlu)
+            _tu = tarihsel_ucuzluk_analizi(kod, fd=det.get("fiyat_df"), deg=deg)
+            det["tarihsel_ucuzluk"] = _tu
+            st.markdown("#### Tarihsel ucuzluk")
+            u1, u2, u3, u4 = st.columns(4)
+            u1.metric("Ucuzluk skoru", f"{_tu.get('skor')}/100" if _tu.get("skor") is not None else "—")
+            u2.metric("1Y fiyat %ile", f"%{_tu.get('fiyat_persentil_1y')}" if _tu.get("fiyat_persentil_1y") is not None else "—")
+            u3.metric("3Y fiyat %ile", f"%{_tu.get('fiyat_persentil_3y')}" if _tu.get("fiyat_persentil_3y") is not None else "—")
+            u4.metric("Ucuz bölge?", "Evet" if _tu.get("ucuz_mu") else ("Hayır" if _tu.get("ucuz_mu") is False else "—"))
+            for n in _tu.get("yorum") or []:
                 st.markdown(f"- {n}")
             st.caption("Skor kural tabanlıdır; yatırım tavsiyesi değildir. Sektör ortalaması ile birlikte okuyun.")
 
