@@ -667,6 +667,226 @@ def tarihsel_ucuzluk_analizi(sembol: str, fd: pd.DataFrame | None = None, deg: d
     return out
 
 
+
+def bilanco_kalite_skoru(isy: dict | None, deg: dict | None = None) -> dict:
+    """Bilanço kalite skoru 0–100. Yatırım tavsiyesi değildir."""
+    isy = isy or {}
+    deg = deg or {}
+    oz = isy.get("ozet") or {}
+    oran = isy.get("oranlar") or {}
+    artilar, eksiler = [], []
+    skor = 55.0
+
+    def _f(v):
+        try:
+            if v is None:
+                return None
+            x = float(v)
+            return x if x == x else None
+        except (TypeError, ValueError):
+            return None
+
+    def _oz(key, field="deger"):
+        item = oz.get(key) or {}
+        return _f(item.get(field)) if isinstance(item, dict) else None
+
+    net_chg = _oz("net_donem_kari", "degisim_%")
+    has_chg = _oz("hasilat", "degisim_%")
+    oz_chg = _oz("ozkaynaklar", "degisim_%")
+    ef_chg = _oz("esas_faaliyet_kari", "degisim_%")
+    nakit = _oz("nakit")
+    kv = _oz("kisa_vadeli_yukumluluk")
+    ozv = _oz("ozkaynaklar")
+    tv = _oz("toplam_varliklar")
+    roe = _f(oran.get("ROE_%")) or _f(deg.get("ROE"))
+    marj = _f(oran.get("net_kar_marji_%")) or _f(deg.get("net_kar_marjı"))
+    borc = _f(oran.get("borc_ozkaynak")) or _f(deg.get("borç/özkaynak"))
+    if borc is not None and borc > 5:
+        borc = borc / 100.0
+    cari = _f(oran.get("cari_oran")) or _f(deg.get("cari_oran"))
+
+    if net_chg is not None:
+        if net_chg >= 25:
+            skor += 10; artilar.append(f"Net kâr YoY +%{net_chg:.0f}")
+        elif net_chg <= -20:
+            skor -= 12; eksiler.append(f"Net kâr YoY %{net_chg:.0f}")
+    if has_chg is not None:
+        if has_chg >= 10:
+            skor += 6; artilar.append(f"Hasılat YoY +%{has_chg:.0f}")
+        elif has_chg < 0:
+            skor -= 6; eksiler.append(f"Hasılat YoY %{has_chg:.0f}")
+    if oz_chg is not None and oz_chg >= 5:
+        skor += 5; artilar.append(f"Özkaynak +%{oz_chg:.0f}")
+    if ef_chg is not None:
+        if ef_chg >= 15:
+            skor += 5; artilar.append(f"Esas faaliyet +%{ef_chg:.0f}")
+        elif ef_chg < -10:
+            skor -= 5; eksiler.append(f"Esas faaliyet %{ef_chg:.0f}")
+    if roe is not None:
+        if roe >= 15:
+            skor += 8; artilar.append(f"ROE %{roe:.1f}")
+        elif roe < 5:
+            skor -= 8; eksiler.append(f"ROE %{roe:.1f}")
+    if marj is not None:
+        if marj >= 10:
+            skor += 5; artilar.append(f"Net marj %{marj:.1f}")
+        elif marj < 3:
+            skor -= 5; eksiler.append(f"Net marj %{marj:.1f}")
+    if borc is not None:
+        if borc <= 0.5:
+            skor += 7; artilar.append(f"Düşük kaldıraç {borc:.2f}")
+        elif borc >= 1.5:
+            skor -= 10; eksiler.append(f"Yüksek kaldıraç {borc:.2f}")
+    if cari is not None:
+        if cari >= 1.5:
+            skor += 5; artilar.append(f"Cari oran {cari:.2f}")
+        elif cari < 1:
+            skor -= 8; eksiler.append(f"Cari oran {cari:.2f}")
+    if nakit is not None and kv:
+        rn = nakit / kv if kv else None
+        if rn is not None:
+            if rn >= 0.3:
+                skor += 4; artilar.append("Nakit/KV yükümlülük makul")
+            elif rn < 0.1:
+                skor -= 4; eksiler.append("Nakit/KV yükümlülük düşük")
+    if tv and ozv:
+        op = ozv / tv
+        if op >= 0.5:
+            skor += 4; artilar.append(f"Özkaynak payı %{op*100:.0f}")
+        elif op < 0.3:
+            skor -= 4; eksiler.append(f"Özkaynak payı %{op*100:.0f}")
+
+    skor = max(0, min(100, round(skor, 1)))
+    if skor >= 70:
+        seviye, yorum = "İyi", "Bilanço kalitesi görece güçlü görünüyor."
+    elif skor >= 45:
+        seviye, yorum = "Orta", "Bilanço kalitesi karışık / nötr."
+    else:
+        seviye, yorum = "Zayıf", "Bilanço kalitesi temkinli — dipnot ve sektör ile doğrulayın."
+    return {
+        "skor": skor, "seviye": seviye, "yorum": yorum,
+        "artilar": artilar, "eksiler": eksiler,
+        "donem": isy.get("gunce_donem"), "kaynak": isy.get("kaynak") or "—",
+    }
+
+
+def model_sinyal_skoru(
+    *,
+    m: dict | None = None,
+    deg: dict | None = None,
+    tek: dict | None = None,
+    tem: dict | None = None,
+    kalite: dict | None = None,
+    tu: dict | None = None,
+) -> dict:
+    """
+    Kural tabanlı model sinyal skoru (−100…+100).
+    YATIRIM TAVSİYESİ VEYA YAPAY ZEKÂ AL/SAT EMRİ DEĞİLDİR.
+    """
+    m, deg, tek = m or {}, deg or {}, tek or {}
+    tem, kalite, tu = tem or {}, kalite or {}, tu or {}
+    bilesen = {}
+    toplam_w = 0.0
+    skor = 0.0
+
+    def _f(v):
+        try:
+            if v is None:
+                return None
+            x = float(v)
+            return x if x == x else None
+        except (TypeError, ValueError):
+            return None
+
+    def _add(name, val, w):
+        nonlocal skor, toplam_w
+        if val is None:
+            return
+        bilesen[name] = round(val, 1)
+        skor += val * w
+        toplam_w += w
+
+    ts = _f(tem.get("skor"))
+    if ts is not None:
+        _add("temel", (ts - 50) * 2, 0.25)
+    ks = _f(kalite.get("skor"))
+    if ks is not None:
+        _add("bilanco_kalite", (ks - 50) * 2, 0.20)
+    us = _f(tu.get("skor"))
+    if us is not None:
+        _add("tarihsel_ucuzluk", (us - 50) * 2, 0.15)
+    sh = _f(m.get("sharpe"))
+    if sh is not None:
+        _add("sharpe", max(-100, min(100, sh * 40)), 0.10)
+    g1y = _f(m.get("getiri_1y"))
+    if g1y is not None:
+        _add("getiri_1y", max(-100, min(100, g1y)), 0.10)
+    dd = _f(m.get("max_drawdown"))
+    if dd is not None:
+        _add("drawdown", max(-100, min(100, 50 + dd)), 0.08)
+    rsi = _f(tek.get("rsi14"))
+    if rsi is not None:
+        if rsi <= 30:
+            _add("rsi", 40, 0.07)
+        elif rsi >= 70:
+            _add("rsi", -40, 0.07)
+        else:
+            _add("rsi", (50 - rsi) * 0.8, 0.07)
+    fk = _f(deg.get("F/K"))
+    if fk is not None:
+        if fk < 8:
+            _add("fk", 30, 0.05)
+        elif fk > 25:
+            _add("fk", -30, 0.05)
+        else:
+            _add("fk", (15 - fk) * 2, 0.05)
+
+    final = (skor / toplam_w) if toplam_w > 0 else 0.0
+    final = max(-100, min(100, round(final, 1)))
+    if final >= 35:
+        etiket = "Model: pozitif eğilim"
+    elif final <= -35:
+        etiket = "Model: negatif eğilim"
+    else:
+        etiket = "Model: nötr / belirsiz"
+    return {
+        "skor": final,
+        "etiket": etiket,
+        "bilesenler": bilesen,
+        "disclaimer": (
+            "Bu çıktı kural tabanlı bir model skorudur; yapay zekâ al/sat emri veya "
+            "yatırım tavsiyesi değildir. Sermaye kaybı riski vardır. Karar size aittir."
+        ),
+    }
+
+
+def rapor_paketi_html(
+    *,
+    baslik: str,
+    kod: str,
+    ad: str = "",
+    donem: str = "",
+    bloklar: list | None = None,
+    meta: dict | None = None,
+) -> str:
+    bloklar = bloklar or []
+    meta = meta or {}
+    rows = "".join(f"<h2>{h}</h2><div class='blk'>{b}</div>" for h, b in bloklar)
+    meta_s = "".join(f"<li><b>{k}:</b> {v}</li>" for k, v in meta.items() if v is not None)
+    return (
+        "<!DOCTYPE html><html lang='tr'><head><meta charset='utf-8'/>"
+        f"<title>{baslik} — {kod}</title>"
+        "<style>body{font-family:system-ui,sans-serif;max-width:900px;margin:24px auto;padding:0 16px}"
+        "h1{font-size:1.4rem}h2{font-size:1.1rem;margin-top:1.4em;border-bottom:1px solid #ddd}"
+        ".blk{white-space:pre-wrap;line-height:1.45}.warn{background:#fff3cd;padding:10px;border-radius:6px}</style>"
+        "</head><body>"
+        f"<h1>{baslik}</h1>"
+        f"<p><b>{kod}</b> {ad} · dönem: {donem} · {datetime.now().strftime('%d.%m.%Y %H:%M')}</p>"
+        "<div class='warn'>Yatırım tavsiyesi değildir. Veriler TEFAS / İş Yatırım / piyasa kaynaklarından derlenmiştir.</div>"
+        f"<ul>{meta_s}</ul>{rows}</body></html>"
+    )
+
+
 # ── Bilanço bildirimleri (FON / HİSSE ayrı) ─────────────────────────────────
 def _bilanco_state_path() -> Path:
     try:
@@ -1564,6 +1784,7 @@ SAYFA_LISTESI = [
     "📋 Tüm Fon Sıralaması",
     "🧪 Filtre Stüdyosu",
     "⚖️ Karşılaştırma",
+    "📦 Rapor Paketleri",
     "📁 Portföy",
     "💼 Portföyüm",
     "🎯 Optimizasyon",
@@ -3886,37 +4107,253 @@ elif sayfa == "🧪 Filtre Stüdyosu":
         st.caption("tefas_filtre modülünü kontrol edin.")
 
 elif sayfa == "⚖️ Karşılaştırma":
-    st.header("⚖️ Fon Karşılaştırma")
-    kodlar_str = st.text_input("Fon kodları (virgülle)", value="AAL,AFO")
-    if st.button("Karşılaştır", type="primary"):
-        analiz = get_analiz()
-        rows = []
-        with st.spinner("Veriler çekiliyor…"):
-            for kod in [k.strip().upper() for k in kodlar_str.split(",") if k.strip()]:
+    st.header("⚖️ Karşılaştırma — Fon + Hisse")
+    st.caption("Fon (TEFAS) ve hisse (BIST) yan yana; getiri, risk, çarpan, bilanço, kalite ve model sinyal.")
+    c1, c2 = st.columns(2)
+    with c1:
+        fon_str = st.text_input("Fon kodları (virgülle)", value="AAL,AFO", key="kar_fon")
+    with c2:
+        hisse_str = st.text_input("Hisse kodları (virgülle)", value="ISDMR,THYAO", key="kar_hisse")
+    if st.button("Karşılaştır", type="primary", key="btn_kar_mix"):
+        rows_f, rows_h = [], []
+        with st.spinner("Fonlar (TEFAS)…"):
+            try:
+                analiz = get_analiz()
+            except Exception as e:
+                analiz = None
+                st.warning(f"TEFAS analiz: {e}")
+            if analiz is not None:
+                for kod in [k.strip().upper() for k in fon_str.split(",") if k.strip()]:
+                    try:
+                        d = analiz.fon_detay(kod)
+                        m, o, p = d["metrikler"], d["ozet"], d["profil"]
+                        sig = model_sinyal_skoru(m=m)
+                        rows_f.append({
+                            "tur": "FON", "kod": kod,
+                            "ad": (o.get("fonUnvan") or p.get("fonUnvan") or kod)[:48],
+                            "risk": p.get("riskDegeri"),
+                            "getiri_1a": m.get("getiri_1a"), "getiri_3a": m.get("getiri_3a"),
+                            "getiri_1y": m.get("getiri_1y"), "volatilite": m.get("volatilite"),
+                            "max_drawdown": m.get("max_drawdown"), "sharpe": m.get("sharpe"),
+                            "fiyat": m.get("fiyat"), "F/K": None, "PD/DD": None, "ROE": None,
+                            "bilanco_donem": None, "kalite_skor": None,
+                            "model_sinyal": sig.get("skor"),
+                        })
+                    except Exception as e:
+                        st.warning(f"Fon {kod}: {e}")
+        with st.spinner("Hisseler…"):
+            for kod in [k.strip().upper().replace(".IS", "") for k in hisse_str.split(",") if k.strip()]:
+                row = {
+                    "tur": "HISSE", "kod": kod, "ad": kod, "risk": None,
+                    "getiri_1a": None, "getiri_3a": None, "getiri_1y": None,
+                    "volatilite": None, "max_drawdown": None, "sharpe": None, "fiyat": None,
+                    "F/K": None, "PD/DD": None, "ROE": None,
+                    "bilanco_donem": None, "kalite_skor": None, "model_sinyal": None,
+                }
                 try:
+                    import yfinance as yf
+                    t = yf.Ticker(f"{kod}.IS")
+                    hist = t.history(period="1y", auto_adjust=True)
+                    if hist is not None and not hist.empty:
+                        px = hist["Close"].dropna()
+                        row["fiyat"] = float(px.iloc[-1])
+                        if len(px) > 22:
+                            row["getiri_1a"] = float((px.iloc[-1] / px.iloc[-22] - 1) * 100)
+                        if len(px) > 66:
+                            row["getiri_3a"] = float((px.iloc[-1] / px.iloc[-66] - 1) * 100)
+                        if len(px) > 2:
+                            row["getiri_1y"] = float((px.iloc[-1] / px.iloc[0] - 1) * 100)
+                        rets = px.pct_change().dropna()
+                        if len(rets) > 10:
+                            row["volatilite"] = float(rets.std() * (252 ** 0.5) * 100)
+                            cum = (1 + rets).cumprod()
+                            row["max_drawdown"] = float((cum / cum.cummax() - 1).min() * 100)
+                    try:
+                        info = dict(t.info or {})
+                    except Exception:
+                        info = {}
+                    row["F/K"] = info.get("trailingPE")
+                    row["PD/DD"] = info.get("priceToBook")
+                    if info.get("returnOnEquity") is not None:
+                        row["ROE"] = float(info["returnOnEquity"]) * 100
+                    row["ad"] = (info.get("longName") or info.get("shortName") or kod)[:48]
+                except Exception as e:
+                    st.caption(f"{kod} fiyat: {e}")
+                try:
+                    isy = isyatirim_mali_tablo(kod)
+                    if isy and not isy.get("error"):
+                        row["bilanco_donem"] = isy.get("gunce_donem")
+                        orans = isy.get("oranlar") or {}
+                        if orans.get("ROE_%") is not None:
+                            row["ROE"] = orans["ROE_%"]
+                        kal = bilanco_kalite_skoru(isy, {"F/K": row["F/K"], "PD/DD": row["PD/DD"], "ROE": row["ROE"]})
+                        row["kalite_skor"] = kal.get("skor")
+                        sig = model_sinyal_skoru(
+                            m={"getiri_1y": row["getiri_1y"], "volatilite": row["volatilite"],
+                               "max_drawdown": row["max_drawdown"], "sharpe": row["sharpe"]},
+                            deg={"F/K": row["F/K"], "PD/DD": row["PD/DD"], "ROE": row["ROE"]},
+                            kalite=kal,
+                        )
+                        row["model_sinyal"] = sig.get("skor")
+                except Exception as e:
+                    st.caption(f"{kod} bilanço: {e}")
+                rows_h.append(row)
+        st.session_state.son_karsilastir = pd.DataFrame(rows_f + rows_h)
+
+    df = st.session_state.get("son_karsilastir")
+    if df is not None and not getattr(df, "empty", True):
+        st.subheader("Ortak metrik tablosu")
+        cols = [
+            "tur", "kod", "ad", "bilanco_donem", "fiyat",
+            "getiri_1a", "getiri_3a", "getiri_1y", "volatilite", "max_drawdown", "sharpe",
+            "F/K", "PD/DD", "ROE", "kalite_skor", "model_sinyal", "risk",
+        ]
+        show_df(df, cols, height=380)
+        download_excel_button(
+            df, f"karsilastir_fon_hisse_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            meta={"mod": "karsilastirma_fon_hisse"}, key="xl_kar_mix",
+        )
+        st.caption("Model sinyal (−100…+100) kural tabanlıdır; al/sat tavsiyesi değildir.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# RAPOR PAKETLERİ
+# ═══════════════════════════════════════════════════════════════════════════
+elif sayfa == "📦 Rapor Paketleri":
+    st.header("📦 Rapor Paketleri")
+    st.caption(
+        "Hisse veya fon için HTML özet paket. "
+        "Bilanço dönemi, kalite skoru, model sinyal. Yatırım tavsiyesi değildir."
+    )
+    rp1, rp2 = st.columns(2)
+    with rp1:
+        rp_tur = st.radio("Tür", ["Hisse", "Fon"], horizontal=True, key="rp_tur")
+    with rp2:
+        rp_kod = st.text_input(
+            "Kod",
+            value="ISDMR" if rp_tur == "Hisse" else "AAL",
+            key="rp_kod",
+        )
+    if st.button("Rapor paketi oluştur", type="primary", key="btn_rp"):
+        kod = (rp_kod or "").strip().upper().replace(".IS", "")
+        bloklar = []
+        meta = {"kod": kod, "tur": rp_tur}
+        ad, donem = kod, ""
+        with st.spinner("Paket hazırlanıyor…"):
+            if rp_tur == "Hisse":
+                isy = {}
+                try:
+                    isy = isyatirim_mali_tablo(kod, force=True)
+                except Exception as e:
+                    st.warning(f"İş Yatırım: {e}")
+                donem = (isy or {}).get("gunce_donem") or ""
+                meta["bilanco_donem"] = donem
+                kal = bilanco_kalite_skoru(isy, {})
+                meta["kalite_skor"] = kal.get("skor")
+                m, deg = {}, {}
+                try:
+                    import yfinance as yf
+                    t = yf.Ticker(f"{kod}.IS")
+                    hist = t.history(period="1y", auto_adjust=True)
+                    if hist is not None and not hist.empty:
+                        px = hist["Close"].dropna()
+                        m["fiyat"] = float(px.iloc[-1])
+                        if len(px) > 2:
+                            m["getiri_1y"] = float((px.iloc[-1] / px.iloc[0] - 1) * 100)
+                    try:
+                        info = dict(t.info or {})
+                    except Exception:
+                        info = {}
+                    ad = info.get("longName") or kod
+                    deg = {"F/K": info.get("trailingPE"), "PD/DD": info.get("priceToBook")}
+                except Exception:
+                    pass
+                tu = tarihsel_ucuzluk_analizi(kod, deg=deg)
+                sig = model_sinyal_skoru(m=m, deg=deg, kalite=kal, tu=tu)
+                meta["model_sinyal"] = sig.get("skor")
+                oz_lines = []
+                for k, item in ((isy or {}).get("ozet") or {}).items():
+                    if isinstance(item, dict) and item.get("deger") is not None:
+                        line = f"{item.get('kalem') or k}: {_fmt_tl(item.get('deger'))}"
+                        if item.get("degisim_%") is not None:
+                            line += f" (YoY %{item.get('degisim_%')})"
+                        oz_lines.append(line)
+                nl = chr(10)
+                bloklar.append(("Bilanço özeti (" + str(donem) + ")", nl.join(oz_lines) or "—"))
+                bloklar.append((
+                    "Bilanço kalite skoru",
+                    (
+                        f"Skor: {kal.get('skor')}/100 ({kal.get('seviye')})" + nl
+                        + str(kal.get("yorum") or "") + nl
+                        + "Artılar: " + ", ".join(kal.get("artilar") or ["—"]) + nl
+                        + "Eksiler: " + ", ".join(kal.get("eksiler") or ["—"])
+                    ),
+                ))
+                bloklar.append((
+                    "Model sinyal (kural tabanlı)",
+                    (
+                        f"Skor: {sig.get('skor')} · {sig.get('etiket')}" + nl
+                        + f"Bileşenler: {sig.get('bilesenler')}" + nl + nl
+                        + str(sig.get("disclaimer") or "")
+                    ),
+                ))
+                bloklar.append(("Tarihsel ucuzluk", nl.join(tu.get("yorum") or ["—"])))
+            else:
+                try:
+                    analiz = get_analiz()
                     d = analiz.fon_detay(kod)
                     m, o, p = d["metrikler"], d["ozet"], d["profil"]
-                    rows.append({
-                        "kod": kod,
-                        "ad": (o.get("fonUnvan") or p.get("fonUnvan") or kod)[:50],
+                    ad = (o.get("fonUnvan") or p.get("fonUnvan") or kod)
+                    meta.update({
+                        "getiri_1y": m.get("getiri_1y"),
+                        "sharpe": m.get("sharpe"),
+                        "max_drawdown": m.get("max_drawdown"),
                         "risk": p.get("riskDegeri"),
-                        "faiz": core.faiz_durum(p),
-                        **m,
                     })
+                    met_lines = [f"{k}: {v}" for k, v in m.items() if v is not None and not str(k).startswith("_")]
+                    nl = chr(10)
+                    bloklar.append(("Fon metrikleri", nl.join(met_lines)))
+                    try:
+                        txt = core.turkce_degerlendirme(
+                            sharpe=m.get("sharpe"), max_dd=m.get("max_drawdown"),
+                            vol=m.get("volatilite"), getiri_1y=m.get("getiri_1y"), plain=True,
+                        )
+                        bloklar.append(("Değerlendirme", str(txt)))
+                    except Exception:
+                        pass
+                    sig = model_sinyal_skoru(m=m)
+                    meta["model_sinyal"] = sig.get("skor")
+                    bloklar.append((
+                        "Model sinyal (kural tabanlı)",
+                        f"Skor: {sig.get('skor')} · {sig.get('etiket')}" + nl + str(sig.get("disclaimer") or ""),
+                    ))
                 except Exception as e:
-                    st.warning(f"{kod}: {e}")
-        st.session_state.son_karsilastir = pd.DataFrame(rows) if rows else pd.DataFrame()
+                    st.error(f"Fon raporu: {e}")
+                    bloklar.append(("Hata", str(e)))
+        html = rapor_paketi_html(
+            baslik="M.Durmaz Rapor Paketi",
+            kod=kod, ad=ad or "", donem=donem or "—",
+            bloklar=bloklar, meta=meta,
+        )
+        st.session_state["_rapor_html"] = html
+        st.session_state["_rapor_meta"] = meta
+        st.success("Paket hazır.")
 
-    df = st.session_state.son_karsilastir
-    if df is not None and not df.empty:
-        cols = [
-            "kod", "ad", "risk", "getiri_1a", "getiri_3a", "getiri_6a", "getiri_1y",
-            "reel_1y", "vs_mevduat", "vs_bist100", "volatilite", "max_drawdown",
-            "sharpe", "sortino", "calmar", "fiyat",
-        ]
-        show_df(df, cols, height=350)
-        download_excel_button(df, f"tefas_karsilastir_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx", key="xl_kar")
-
+    if st.session_state.get("_rapor_html"):
+        meta0 = st.session_state.get("_rapor_meta") or {}
+        st.download_button(
+            "HTML indir",
+            data=st.session_state["_rapor_html"].encode("utf-8"),
+            file_name=f"rapor_{meta0.get('kod', 'x')}_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
+            mime="text/html",
+            key="dl_rp_html",
+        )
+        with st.expander("Önizleme"):
+            try:
+                import streamlit.components.v1 as components
+                components.html(st.session_state["_rapor_html"], height=480, scrolling=True)
+            except Exception:
+                st.code(st.session_state["_rapor_html"][:2000])
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PORTFÖY
@@ -6208,6 +6645,48 @@ elif sayfa == "🔎 Hisse Detay":
 
             st.markdown("#### Sonuç")
             st.markdown(_sw.get("sonuc") or "")
+
+            _kal = bilanco_kalite_skoru(
+                _core_bil if isinstance(_core_bil, dict) else {},
+                deg,
+            )
+            _tu2 = det.get("tarihsel_ucuzluk") or tarihsel_ucuzluk_analizi(
+                kod, fd=det.get("fiyat_df"), deg=deg
+            )
+            _sig = model_sinyal_skoru(
+                m=m, deg=deg, tek=_tek, tem=_tem, kalite=_kal, tu=_tu2
+            )
+            det["bilanco_kalite"] = _kal
+            det["model_sinyal"] = _sig
+
+            st.markdown("#### Bilanço kalite skoru")
+            k1, k2, k3 = st.columns(3)
+            k1.metric("Kalite", f"{_kal.get('skor')}/100")
+            k2.metric("Seviye", _kal.get("seviye") or "—")
+            k3.metric("Dönem", _kal.get("donem") or _bil.get("etiket") or "—")
+            st.caption(_kal.get("yorum") or "")
+            kc1, kc2 = st.columns(2)
+            with kc1:
+                st.markdown("**Artılar**")
+                for x in _kal.get("artilar") or ["—"]:
+                    st.markdown(f"- {x}")
+            with kc2:
+                st.markdown("**Eksiler**")
+                for x in _kal.get("eksiler") or ["—"]:
+                    st.markdown(f"- {x}")
+
+            st.markdown("#### Model sinyal (kural tabanlı)")
+            st.warning(_sig.get("disclaimer") or "")
+            s1, s2 = st.columns(2)
+            s1.metric("Sinyal skoru", f"{_sig.get('skor')}")
+            s2.metric("Etiket", _sig.get("etiket") or "—")
+            if _sig.get("bilesenler"):
+                st.dataframe(
+                    pd.DataFrame(
+                        [{"Bileşen": k, "Katkı": v} for k, v in _sig["bilesenler"].items()]
+                    ),
+                    hide_index=True, use_container_width=True,
+                )
 
             st.markdown("#### Risk–getiri (sade dil)")
             try:
