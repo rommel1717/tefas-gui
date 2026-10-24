@@ -4551,17 +4551,93 @@ elif sayfa == "📈 Hisse & Karma Portföy":
 # FAVORİLER
 # ═══════════════════════════════════════════════════════════════════════════
 elif sayfa == "🏦 BIST Değerleme":
+    st.header("🏦 BIST Değerleme")
+    # Güncel bilanço dönemi — raporlar buna göre üretilmeli
     try:
-        tefas_bist.render(show_df=show_df, download_excel_button=download_excel_button)
+        _bd_bist = son_bilanco_donemi(probe=False)
+    except Exception:
+        _bd_bist = {"etiket": "?", "aciklama": ""}
+    st.caption(
+        f"Takvim / aktif bilanço dönemi: **{_bd_bist.get('etiket')}** "
+        f"({_bd_bist.get('aciklama') or '—'}). "
+        "Tek hisse raporlarında İş Yatırım’da **dolu olan en yeni dönem** (ör. 2026/9) kullanılır; "
+        "eski çeyrek (2026/6) yok sayılır."
+    )
+    # tefas_bist modülüne dönem bilgisini ilet (varsa okur)
+    try:
+        st.session_state["bist_rapor_donem"] = {
+            "yil": _bd_bist.get("yil"),
+            "donem": _bd_bist.get("donem"),
+            "etiket": _bd_bist.get("etiket"),
+            "kaynak": _bd_bist.get("kaynak") or "takvim",
+        }
+        for attr, val in (
+            ("RAPOR_DONEM", _bd_bist.get("etiket")),
+            ("BILANCO_YIL", _bd_bist.get("yil")),
+            ("BILANCO_DONEM", _bd_bist.get("donem")),
+        ):
+            try:
+                setattr(tefas_bist, attr, val)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    col_a, col_b = st.columns([1, 1])
+    with col_a:
+        if st.button("Seçili / örnek hisse İş Yatırım dönemini doğrula", key="btn_bist_isy_probe"):
+            probe_kod = st.session_state.get("bist_probe_kod") or "ISDMR"
+            with st.spinner(f"{probe_kod} İş Yatırım…"):
+                try:
+                    isy = isyatirim_mali_tablo(probe_kod, force=True)
+                    if isy.get("error"):
+                        st.warning(isy["error"])
+                    else:
+                        st.success(
+                            f"**{probe_kod}** güncel kolon: **{isy.get('gunce_donem')}** "
+                            f"(API dolu en yeni dönem). Raporlar buna göre."
+                        )
+                        st.session_state["bist_probe_isy"] = {
+                            "kod": probe_kod,
+                            "donem": isy.get("gunce_donem"),
+                            "oranlar": isy.get("oranlar"),
+                            "ozet_keys": list((isy.get("ozet") or {}).keys()),
+                        }
+                except Exception as e:
+                    st.error(str(e))
+    with col_b:
+        st.text_input("Probe hisse kodu", value="ISDMR", key="bist_probe_kod")
+        _pi = st.session_state.get("bist_probe_isy")
+        if _pi:
+            st.caption(f"Son probe: {_pi.get('kod')} → **{_pi.get('donem')}**")
+
+    try:
+        # Dönem bilgisini render'a keyword ile de dene
+        try:
+            tefas_bist.render(
+                show_df=show_df,
+                download_excel_button=download_excel_button,
+                bilanco_donem=_bd_bist.get("etiket"),
+                bilanco_yil=_bd_bist.get("yil"),
+                bilanco_donem_no=_bd_bist.get("donem"),
+            )
+        except TypeError:
+            tefas_bist.render(show_df=show_df, download_excel_button=download_excel_button)
     except Exception as e:
         st.error(f"BIST Değerleme yüklenemedi: {e}")
         st.caption("tefas_bist modülünü kontrol edin.")
+        st.info(
+            "Tek hisse için güncel bilanço + SWOT: **🔎 Hisse Detay** sayfasını kullanın "
+            "(İş Yatırım MaliTablo, örn. ISDMR → 2026/9)."
+        )
 
 elif sayfa == "🔎 Hisse Detay":
     st.header("🔎 Hisse Detay Analizi")
     st.caption(
-        "Excel «Hisse Analiz» sayfası tarzında: fiyat · getiri · risk · değerleme · "
-        "grafikler · BIST karşılaştırması. Kod örn. THYAO, GARAN, ASELS."
+        "Excel «Hisse Analiz» tarzı: fiyat · getiri · risk · değerleme · grafikler · SWOT. "
+        "Mali tablo **İş Yatırım** üzerinden; hisse için API’de dolu **en yeni dönem** "
+        "(ör. 2026/9 geldiyse 2026/6 kullanılmaz) tüm rapor ve skora işlenir. "
+        "Kod örn. THYAO, GARAN, ISDMR."
     )
 
     def _hisse_sembol_normalize(raw: str) -> str:
