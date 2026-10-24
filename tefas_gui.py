@@ -543,6 +543,23 @@ def fmt_num(v, digits=1, suffix=""):
         return "—"
 
 
+def _fmt_tl(v):
+    """TL tutarlarını okunabilir kısalt (mlr / mn)."""
+    if v is None:
+        return "—"
+    try:
+        x = float(v)
+        if abs(x) >= 1e9:
+            return f"{x/1e9:.2f} mlr"
+        if abs(x) >= 1e6:
+            return f"{x/1e6:.1f} mn"
+        return f"{x:,.0f}"
+    except (TypeError, ValueError):
+        return "—"
+
+# Eski / eksik deploy'larda NameError olmasın diye alias
+fmt_tl = _fmt_tl
+
 
 # ── Bilanço bildirimleri (FON / HİSSE ayrı) ─────────────────────────────────
 def _bilanco_state_path() -> Path:
@@ -5471,6 +5488,22 @@ elif sayfa == "🔎 Hisse Detay":
                     st.caption(f"Şirket kartı: {_core_bil['url']}")
 
                 # Özet KPI
+                def _tl(v):
+                    try:
+                        return _fmt_tl(v)
+                    except NameError:
+                        if v is None:
+                            return "—"
+                        try:
+                            x = float(v)
+                            if abs(x) >= 1e9:
+                                return f"{x/1e9:.2f} mlr"
+                            if abs(x) >= 1e6:
+                                return f"{x/1e6:.1f} mn"
+                            return f"{x:,.0f}"
+                        except Exception:
+                            return "—"
+
                 oz = _core_bil.get("ozet") or {}
                 orans = _core_bil.get("oranlar") or {}
                 kpis = st.columns(4)
@@ -5485,7 +5518,7 @@ elif sayfa == "🔎 Hisse Detay":
                     delta = item.get("degisim_%")
                     kpis[i].metric(
                         lab,
-                        _fmt_tl(item.get("deger")),
+                        _tl(item.get("deger")),
                         delta=f"%{delta}" if delta is not None else None,
                     )
                 if orans:
@@ -5513,8 +5546,8 @@ elif sayfa == "🔎 Hisse Detay":
                         continue
                     oz_rows.append({
                         "Kalem": item.get("kalem") or key,
-                        _core_bil.get("gunce_donem") or "Güncel": _fmt_tl(item.get("deger")),
-                        "YoY aynı dönem": _fmt_tl(item.get("onceki_yoy")),
+                        _core_bil.get("gunce_donem") or "Güncel": _tl(item.get("deger")),
+                        "YoY aynı dönem": _tl(item.get("onceki_yoy")),
                         "Değişim %": item.get("degisim_%"),
                     })
                 if oz_rows:
