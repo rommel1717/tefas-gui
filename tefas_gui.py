@@ -29,7 +29,7 @@ import tefas_bist  # noqa: E402
 import tefas_panel  # noqa: E402
 # ── Sayfa ayarı ─────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="TEFAS Fon Analiz",
+    page_title="M.Durmaz · TEFAS Fon Analiz",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -575,22 +575,115 @@ def _save_bilanco_state(state: dict) -> None:
 
 def _beklenen_bilanco_donemi(ref: datetime | None = None) -> dict:
     """
-    BIST şirketleri için yaklaşık son tamamlanmış çeyrek.
-    KAP takvimi: Q1→Mayıs, Q2→Ağustos, Q3→Kasım, Yıllık→Mart civarı.
-    Fon tarafında TEFAS günlük NAV; 'dönem' bilgi amaçlı aynı takvim kullanılır.
+    Takvime göre *beklenen* son bilanço dönemi (KAP yayın gecikmesi dahil).
+    Q1 ~Mayıs, Q2 ~Ağustos, Q3 ~Ekim sonu, Yıllık ~Şubat–Mart.
+    Asıl kaynak her zaman core.bilanco_donem_durumu / canlı probe'dur;
+    bu fonksiyon yedek takvimdir.
     """
     ref = ref or datetime.now()
     y, m = ref.year, ref.month
-    # Raporlama gecikmesi ~1.5–2 ay
     if m <= 2:
-        return {"yil": y - 1, "donem": 9, "etiket": f"{y-1}/Q3", "tur": "ara"}
-    if m <= 5:
-        return {"yil": y - 1, "donem": 12, "etiket": f"{y-1}/Yıllık", "tur": "yillik"}
-    if m <= 8:
-        return {"yil": y, "donem": 3, "etiket": f"{y}/Q1", "tur": "ara"}
-    if m <= 11:
-        return {"yil": y, "donem": 6, "etiket": f"{y}/Q2", "tur": "ara"}
-    return {"yil": y, "donem": 9, "etiket": f"{y}/Q3", "tur": "ara"}
+        # Yıllık tablolar henüz gelmemiş olabilir → önceki yıl Q3
+        return {"yil": y - 1, "donem": 9, "etiket": f"{y-1}/9", "tur": "ara", "aciklama": "9 aylık"}
+    if m <= 4:
+        return {"yil": y - 1, "donem": 12, "etiket": f"{y-1}/12", "tur": "yillik", "aciklama": "yıllık"}
+    if m <= 7:
+        return {"yil": y, "donem": 3, "etiket": f"{y}/3", "tur": "ara", "aciklama": "3 aylık"}
+    if m <= 9:
+        return {"yil": y, "donem": 6, "etiket": f"{y}/6", "tur": "ara", "aciklama": "6 aylık"}
+    # Ekim–Aralık: 9 aylık (Q3) sezonu
+    return {"yil": y, "donem": 9, "etiket": f"{y}/9", "tur": "ara", "aciklama": "9 aylık"}
+
+
+def son_bilanco_donemi(*, probe: bool = False, force_refresh: bool = False) -> dict:
+    """
+    Analiz ve raporların bağlanacağı *güncel* bilanço dönemi.
+    Öncelik: core canlı durum > kayıtlı state > takvim beklentisi.
+    Yeni dönem gelince state güncellenir; rapor meta'sına yazılır.
+    """
+    state = _load_bilanco_state()
+    bek = _beklenen_bilanco_donemi()
+    result = {
+        "yil": bek["yil"],
+        "donem": bek["donem"],
+        "etiket": bek["etiket"],
+        "aciklama": bek.get("aciklama") or f"{bek['donem']} aylık",
+        "kaynak": "takvim",
+        "durum": "bekleniyor",
+        "yeni_donem": False,
+        "onceki": None,
+    }
+    bil = {}
+    try:
+        bil = core.bilanco_donem_durumu(probe=probe) or {}
+    except Exception as e:
+        bil = {"mesaj": str(e)}
+
+    if bil.get("yil") and bil.get("donem"):
+        result["yil"] = int(bil["yil"])
+        result["donem"] = int(bil["donem"])
+        result["etiket"] = f"{result['yil']}/{result['donem']}"
+        result["aciklama"] = (
+            "yıllık" if result["donem"] == 12 else f"{result['donem']} aylık"
+        )
+        result["kaynak"] = "core"
+        result["durum"] = bil.get("durum") or "geldi"
+        if bil.get("mesaj"):
+            result["mesaj"] = bil["mesaj"]
+        if "probe" in bil:
+            result["probe"] = bil.get("probe")
+    else:
+        # Core yoksa: kayıtlı son dönem, takvimden eskiyse takvimi kullan
+        prev = state.get("aktif_donem") or state.get("hisse") or {}
+        if prev.get("yil") and prev.get("donem"):
+            py, pd_ = int(prev["yil"]), int(prev["donem"])
+            # takvim daha yeniyse takvime geç
+            if (bek["yil"], bek["donem"]) > (py, pd_):
+                result["kaynak"] = "takvim"
+            else:
+                result["yil"], result["donem"] = py, pd_
+                result["etiket"] = f"{py}/{pd_}"
+                result["aciklama"] = "yıllık" if pd_ == 12 else f"{pd_} aylık"
+                result["kaynak"] = "state"
+                result["durum"] = prev.get("durum") or "geldi"
+        if bil.get("mesaj"):
+            result["mesaj"] = bil["mesaj"]
+
+    # Önceki dönem kaydı
+    prev_aktif = state.get("aktif_donem") or {}
+    if prev_aktif.get("yil") and prev_aktif.get("donem"):
+        if (int(prev_aktif["yil"]), int(prev_aktif["donem"])) != (result["yil"], result["donem"]):
+            result["yeni_donem"] = True
+            result["onceki"] = {
+                "yil": int(prev_aktif["yil"]),
+                "donem": int(prev_aktif["donem"]),
+                "etiket": f"{prev_aktif['yil']}/{prev_aktif['donem']}",
+            }
+            # Dönem değişti → eski metrik snapshot'larını "önceki dönem" olarak işaretle
+            # (mali_tablo_iyilesme_kontrolu zaten son değerleri saklıyor)
+            result["durum"] = result.get("durum") or "geldi"
+            result["mesaj"] = (
+                f"🆕 Güncel bilanço dönemi: {result['etiket']} "
+                f"(önceki: {result['onceki']['etiket']}) — analizler buna göre yenilenmeli"
+            )
+
+    # Aktif dönemi kalıcı yaz (analiz/rapor aynı kaynağı kullansın)
+    state["aktif_donem"] = {
+        "yil": result["yil"],
+        "donem": result["donem"],
+        "etiket": result["etiket"],
+        "aciklama": result["aciklama"],
+        "durum": result.get("durum"),
+        "son_guncelleme": datetime.now().isoformat(timespec="seconds"),
+        "kaynak": result["kaynak"],
+    }
+    _save_bilanco_state(state)
+    # Session'a da koy — UI tek yerden okusun
+    try:
+        st.session_state["aktif_bilanco"] = result
+    except Exception:
+        pass
+    return result
 
 
 def _onceki_donem(yil: int, donem: int) -> tuple[int, int]:
@@ -607,79 +700,48 @@ def _onceki_donem(yil: int, donem: int) -> tuple[int, int]:
 def bilanco_bildirimleri(probe: bool = False) -> dict:
     """
     FON ve HİSSE bilanço/dönem bildirimlerini ayrı üretir.
-    core.bilanco_donem_durumu varsa hisse tarafında kullanır.
+    Hisse tarafı her zaman son_bilanco_donemi() (canlı / en güncel dönem).
     """
+    aktif = son_bilanco_donemi(probe=probe)
     bek = _beklenen_bilanco_donemi()
     state = _load_bilanco_state()
     now_s = datetime.now().isoformat(timespec="seconds")
+    bil_core = {"yil": aktif.get("yil"), "donem": aktif.get("donem"), "durum": aktif.get("durum")}
 
-    # ── HİSSE (BIST / KAP) ────────────────────────────────────────────────
+    # ── HİSSE (BIST / KAP) — her zaman en son gelen dönem ─────────────────
     hisse = {
         "kaynak": "BIST / KAP / İş Yatırım",
         "beklenen_yil": bek["yil"],
         "beklenen_donem": bek["donem"],
         "beklenen_etiket": bek["etiket"],
-        "durum": "bekleniyor",
-        "mesaj": f"Beklenen dönem: {bek['etiket']}",
-        "yeni_donem": False,
-        "probe": None,
+        "yil": aktif["yil"],
+        "donem": aktif["donem"],
+        "etiket": aktif["etiket"],
+        "aciklama": aktif.get("aciklama"),
+        "durum": aktif.get("durum") or "geldi",
+        "mesaj": aktif.get("mesaj") or f"Güncel dönem: {aktif['etiket']} ({aktif.get('aciklama')})",
+        "yeni_donem": bool(aktif.get("yeni_donem")),
+        "probe": aktif.get("probe"),
+        "onceki_etiket": (aktif.get("onceki") or {}).get("etiket"),
     }
-    bil_core = {}
-    try:
-        bil_core = core.bilanco_donem_durumu(probe=probe) or {}
-    except Exception as e:
-        bil_core = {"durum": "?", "mesaj": str(e)}
 
-    if bil_core.get("yil") and bil_core.get("donem"):
-        hisse["yil"] = int(bil_core["yil"])
-        hisse["donem"] = int(bil_core["donem"])
-        hisse["etiket"] = f"{hisse['yil']}/{hisse['donem']:02d}"
-    else:
-        hisse["yil"] = bek["yil"]
-        hisse["donem"] = bek["donem"]
-        hisse["etiket"] = bek["etiket"]
-
-    hisse["durum"] = bil_core.get("durum") or hisse["durum"]
-    if bil_core.get("mesaj"):
-        hisse["mesaj"] = bil_core["mesaj"]
-    if "probe" in bil_core:
-        hisse["probe"] = bil_core.get("probe")
-
-    prev_h = state.get("hisse") or {}
-    prev_key = (prev_h.get("yil"), prev_h.get("donem"))
-    cur_key = (hisse.get("yil"), hisse.get("donem"))
-    if cur_key != prev_key and hisse.get("durum") == "geldi":
-        hisse["yeni_donem"] = True
-        hisse["onceki_etiket"] = (
-            f"{prev_h['yil']}/{prev_h['donem']:02d}" if prev_h.get("yil") else None
-        )
-        hisse["mesaj"] = (
-            f"🆕 Yeni bilanço dönemi: {hisse['etiket']}"
-            + (f" (önceki: {hisse['onceki_etiket']})" if hisse.get("onceki_etiket") else "")
-        )
-
-    # ── FON (TEFAS — bilanço değil; dönemsel getiri / profil güncelliği) ──
+    # ── FON (TEFAS — NAV günlük; rapor çeyreği hisse ile aynı takvim) ──
     fon = {
         "kaynak": "TEFAS",
-        "beklenen_etiket": bek["etiket"],
+        "beklenen_etiket": aktif["etiket"],
         "durum": "gunluk",
-        "mesaj": "Fon fiyatları (NAV) günlük; bilanço çeyreklik tablosu hisse tarafındadır.",
-        "yeni_donem": False,
-        "yil": bek["yil"],
-        "donem": bek["donem"],
-        "etiket": bek["etiket"],
+        "mesaj": f"NAV günlük güncel · rapor çeyreği: {aktif['etiket']}",
+        "yeni_donem": bool(aktif.get("yeni_donem")),
+        "yil": aktif["yil"],
+        "donem": aktif["donem"],
+        "etiket": aktif["etiket"],
     }
-    # TEFAS'ta 'yeni dönem' = takvim çeyreği değişti + kullanıcıya hatırlatma
-    prev_f = state.get("fon") or {}
-    if (prev_f.get("yil"), prev_f.get("donem")) != (fon["yil"], fon["donem"]):
-        fon["yeni_donem"] = True
+    if aktif.get("yeni_donem"):
         fon["durum"] = "yeni_ceyrek"
         fon["mesaj"] = (
             f"📅 Yeni raporlama çeyreği: {fon['etiket']} — "
             "fon dağılım / büyüklük özetlerini tarama ile yenileyin."
         )
-    else:
-        fon["durum"] = prev_f.get("durum") or "gunluk"
 
     # State güncelle
     state["hisse"] = {
@@ -767,6 +829,13 @@ def mali_tablo_iyilesme_kontrolu(
     # Kaydı güncelle (her zaman son değerleri sakla)
     snap = {k: yeni_metrikler.get(k) for k in set([c[0] for c in checks]) | set(yeni_metrikler.keys())}
     snap["_kayit"] = datetime.now().isoformat(timespec="seconds")
+    try:
+        _ad = son_bilanco_donemi(probe=False)
+        snap["_bilanco_donem"] = _ad.get("etiket")
+        snap["_bilanco_yil"] = _ad.get("yil")
+        snap["_bilanco_donem_no"] = _ad.get("donem")
+    except Exception:
+        pass
     onceki_map[kod] = snap
     state[key_store] = onceki_map
     _save_bilanco_state(state)
@@ -1082,7 +1151,7 @@ def _goto(sayfa_adi: str, *, auto_sepet: bool = False):
 
 # ── Sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("📊 TEFAS Analiz")
+    st.title("📊 M.Durmaz")
     st.caption("Fon tarama · risk · portföy · rapor")
 
     # key="sayfa" → radio doğrudan session_state.sayfa yazar (_goto ile uyumlu)
@@ -1147,7 +1216,7 @@ if sayfa == "🏠 Ana Sayfa":
     st.markdown(
         """
 <div class="hero">
-  <h1>TEFAS Fon Analiz</h1>
+  <h1>M.Durmaz · TEFAS Fon Analiz</h1>
   <p>Günlük özet · alarm · track record · net getiri · bilanço bildirimi</p>
 </div>
 """,
@@ -3536,10 +3605,16 @@ elif sayfa == "🔎 Fon Detay":
         m, o, p, ad, kod = det["m"], det["o"], det["p"], det["ad"], det["kod"]
         an, liq = det.get("an") or {}, det.get("liq") or {}
         st.subheader(f"`{kod}` — {ad}")
+        try:
+            _bd_f = son_bilanco_donemi(probe=False)
+            _donem_not = f" · Rapor çeyreği: {_bd_f.get('etiket')}"
+        except Exception:
+            _donem_not = ""
         st.caption(
             f"TEFAS: {p.get('tefasDurum')} · Risk: {p.get('riskDegeri')} · "
             f"Faiz: {core.faiz_durum(p, ad)} · Kategori: {o.get('fonKategori')} · "
             f"İşlem: {p.get('basIsSaat') or '?'}-{p.get('sonIsSaat') or '?'}"
+            f"{_donem_not} · NAV günlük güncel"
         )
 
         c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -4160,7 +4235,20 @@ elif sayfa == "🔎 Hisse Detay":
         endustri = deg.get("endüstri") or info.get("industry") or "—"
 
         st.subheader(f"`{kod}` — {ad}")
-        st.caption(f"{sembol} · {sektor} · {endustri} · kaynak: {det.get('kaynak') or 'core'}")
+        try:
+            _bd = son_bilanco_donemi(probe=False)
+            st.caption(
+                f"{sembol} · {sektor} · {endustri} · kaynak: {det.get('kaynak') or 'core'} · "
+                f"**Mali tablo dönemi: {_bd.get('etiket')} ({_bd.get('aciklama')})**"
+            )
+            if _bd.get("yeni_donem"):
+                st.warning(
+                    f"Yeni bilanço dönemi: **{_bd.get('etiket')}**"
+                    + (f" — önceki {_bd['onceki']['etiket']}" if _bd.get("onceki") else "")
+                    + ". Raporlar bu döneme göre güncellenir."
+                )
+        except Exception:
+            st.caption(f"{sembol} · {sektor} · {endustri} · kaynak: {det.get('kaynak') or 'core'}")
 
         # KPI şeridi
         k1, k2, k3, k4, k5, k6 = st.columns(6)
@@ -4328,10 +4416,20 @@ elif sayfa == "🔎 Hisse Detay":
                 if k not in row:
                     row[f"d_{k}"] = v
             edf = pd.DataFrame([row])
+            try:
+                _bd_x = son_bilanco_donemi(probe=False)
+                _meta_x = {
+                    "mod": "hisse_detay", "sembol": sembol, "ad": ad,
+                    "bilanco_donem": _bd_x.get("etiket"),
+                    "bilanco_aciklama": _bd_x.get("aciklama"),
+                    "bilanco_kaynak": _bd_x.get("kaynak"),
+                }
+            except Exception:
+                _meta_x = {"mod": "hisse_detay", "sembol": sembol, "ad": ad}
             download_excel_button(
                 edf,
                 f"hisse_detay_{kod}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                meta={"mod": "hisse_detay", "sembol": sembol, "ad": ad},
+                meta=_meta_x,
                 key="xl_hisse_detay",
             )
             if st.button("📄 HTML risk raporu", key="btn_hisse_det_html"):
