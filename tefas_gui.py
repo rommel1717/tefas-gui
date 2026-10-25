@@ -39,65 +39,220 @@ st.set_page_config(
 st.markdown(
     """
 <style>
-  .block-container { padding-top: 1rem; padding-bottom: 2.5rem; max-width: 1200px; }
-  div[data-testid="stMetricValue"] { font-size: 1.4rem; font-weight: 700; }
-  div[data-testid="stMetricLabel"] { font-size: 0.82rem; color: #94a3b8; }
-  .stDataFrame { font-size: 0.88rem; }
-  h1 { font-size: 1.75rem !important; letter-spacing: -0.02em; }
-  h2 { font-size: 1.22rem !important; margin-top: 0.7rem !important; }
-  h3 { font-size: 1.05rem !important; }
-  [data-testid="stSidebar"] { background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%); }
+  /* ═══════════════════════════════════════════
+     DESIGN TOKENS (tek kaynak — tüm sayfalar)
+     ═══════════════════════════════════════════ */
+  :root {
+    --bg: #0b1220;
+    --bg2: #0f172a;
+    --surface: #1e293b;
+    --surface2: #162032;
+    --line: #334155;
+    --line2: #1e293b;
+    --text: #f1f5f9;
+    --muted: #94a3b8;
+    --muted2: #64748b;
+    --accent: #3b82f6;
+    --accent2: #0ea5e9;
+    --accent-dim: #1d4ed8;
+    --pos: #3ddc97;
+    --pos-bg: #0f3d32;
+    --neg: #ff6b6b;
+    --neg-bg: #3d1a1a;
+    --warn: #fcd34d;
+    --radius: 14px;
+    --radius-sm: 10px;
+    --shadow: 0 8px 28px rgba(0,0,0,.28);
+  }
+
+  .block-container {
+    padding-top: 1.1rem; padding-bottom: 3rem; max-width: 1280px;
+  }
+  html, body, [class*="css"] {
+    font-family: "Segoe UI", "Inter", system-ui, -apple-system, sans-serif !important;
+  }
+  h1, h2, h3 { letter-spacing: -0.02em; color: var(--text); }
+
+  /* Sidebar */
+  [data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #0b1220 0%, #0f172a 55%, #111827 100%);
+    border-right: 1px solid var(--line2);
+  }
   [data-testid="stSidebar"] * { color: #e2e8f0 !important; }
-  [data-testid="stSidebar"] .stRadio label { font-size: 0.92rem; }
+  [data-testid="stSidebar"] .stRadio label { font-size: 0.9rem; padding: 4px 2px; }
+  div[data-testid="stSidebar"] .stButton > button {
+    width: 100%; border-radius: var(--radius-sm);
+    background: var(--surface); border: 1px solid var(--line); color: #e2e8f0;
+  }
+  div[data-testid="stSidebar"] .stButton > button:hover {
+    border-color: var(--accent); color: #93c5fd;
+  }
+
+  /* Hero */
   .hero {
-    background: linear-gradient(135deg, #0f2744, #1d4ed8);
-    color: white; border-radius: 16px; padding: 22px 26px; margin-bottom: 18px;
+    background: linear-gradient(125deg, #0f2744 0%, var(--accent-dim) 48%, #0e7490 100%);
+    color: white; border-radius: 18px; padding: 24px 28px; margin-bottom: 18px;
+    box-shadow: var(--shadow); border: 1px solid rgba(255,255,255,0.08);
   }
-  .hero h1 { color: white !important; margin: 0 0 8px; }
-  .hero p { margin: 0; opacity: 0.92; font-size: 0.95rem; }
-  .flow-step {
-    background: #1e293b; border: 1px solid #334155; border-radius: 12px;
-    padding: 14px 16px; height: 100%; color: #e2e8f0;
+  .hero h1 { color: white !important; margin: 0 0 8px; font-size: 1.55rem; }
+  .hero p { margin: 0; opacity: 0.92; font-size: 0.95rem; line-height: 1.5; }
+
+  /* Cards */
+  .flow-step, .token-card {
+    background: linear-gradient(145deg, var(--surface), var(--bg2));
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 16px 18px; color: var(--text); box-shadow: var(--shadow);
   }
+  .flow-step:hover, .token-card:hover { border-color: var(--accent); }
   .flow-step b { color: #60a5fa; }
+
   .badge {
     display:inline-block; padding:3px 10px; border-radius:999px;
     font-size:0.75rem; font-weight:600; margin-right:4px;
   }
-  .badge-ok  { background:#064e3b; color:#6ee7b7; }
-  .badge-warn{ background:#78350f; color:#fcd34d; }
-  .badge-bad { background:#7f1d1d; color:#fca5a5; }
-  /* Karanlık tema: grafik görselleri ve tablo çerçeveleri */
-  [data-testid="stImage"] img { border-radius: 10px; }
-  [data-testid="stExpander"] { border-color: #334155 !important; }
+  .badge-ok  { background: var(--pos-bg); color: var(--pos); }
+  .badge-warn{ background:#78350f; color: var(--warn); }
+  .badge-bad { background: var(--neg-bg); color: var(--neg); }
+
+  /* Metrics */
+  [data-testid="stMetric"] {
+    background: linear-gradient(160deg, #1e293bcc, #0f172acc);
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 12px 14px; box-shadow: 0 4px 16px rgba(0,0,0,.18);
+  }
+  [data-testid="stMetricLabel"] { color: var(--muted) !important; font-size: 0.8rem !important; }
+  [data-testid="stMetricValue"] { color: var(--text) !important; font-weight: 700 !important; }
+
+  /* Tabs */
+  .stTabs [data-baseweb="tab-list"] {
+    gap: 6px; background: transparent; border-bottom: 1px solid var(--line2);
+  }
+  .stTabs [data-baseweb="tab"] {
+    border-radius: 10px 10px 0 0; padding: 8px 14px;
+    background: var(--bg2); border: 1px solid var(--line2); color: var(--muted);
+  }
+  .stTabs [aria-selected="true"] {
+    background: var(--surface) !important; color: #93c5fd !important;
+    border-color: var(--accent) !important;
+  }
+
+  /* Buttons */
+  button[data-testid="baseButton-primary"],
+  .stButton > button[kind="primary"] {
+    border-radius: var(--radius-sm) !important;
+    background: linear-gradient(135deg, var(--accent), var(--accent2)) !important;
+    border: none !important; font-weight: 600 !important;
+    box-shadow: 0 4px 14px rgba(59,130,246,.35) !important;
+  }
+  .stButton > button { border-radius: var(--radius-sm); }
+
+  /* Data / expander / charts */
+  [data-testid="stDataFrame"] {
+    border: 1px solid var(--line2); border-radius: 12px; overflow: hidden;
+  }
+  [data-testid="stExpander"] {
+    border: 1px solid var(--line2) !important; border-radius: 12px !important;
+    background: #0f172a88;
+  }
+  [data-testid="stPlotlyChart"] {
+    border: 1px solid var(--line2); border-radius: var(--radius);
+    padding: 6px; background: var(--bg);
+  }
+  [data-testid="stImage"] img { border-radius: 12px; }
+
+  .stProgress > div > div > div > div {
+    background: linear-gradient(90deg, var(--pos), var(--accent));
+  }
+
   .sepet-box {
-    background: #1e293b; border: 1px solid #334155; border-radius: 10px;
-    padding: 10px 12px; margin-top: 8px;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 12px; padding: 12px 14px; margin-top: 8px;
+  }
+  .sepet-badge {
+    display:inline-block;
+    background: linear-gradient(135deg, var(--accent-dim), var(--accent2));
+    color:#fff; border-radius:999px; padding:3px 10px;
+    font-size:0.75rem; font-weight:700;
   }
   .disclaimer {
-    margin-top: 2rem; padding: 12px 16px; border-radius: 10px;
-    background: #0f172a; border: 1px solid #334155; color: #94a3b8;
-    font-size: 0.8rem; line-height: 1.45;
+    margin-top: 2.2rem; padding: 14px 18px; border-radius: 12px;
+    background: var(--bg2); border: 1px solid var(--line); color: var(--muted);
+    font-size: 0.8rem; line-height: 1.5;
   }
-  div[data-testid="stSidebar"] .stButton > button {
-    width: 100%; border-radius: 8px;
+
+  /* Portföyüm tokens (fy-*) — aynı palet */
+  .fy-card {
+    background: linear-gradient(145deg, var(--surface), var(--bg2));
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 14px 16px; margin-bottom: 10px; box-shadow: var(--shadow);
   }
-  /* metric kartları */
-  [data-testid="stMetric"] {
-    background: #1e293b22; border: 1px solid #33415555;
-    border-radius: 10px; padding: 8px 10px;
+  .fy-card .lbl {
+    font-size: 0.72rem; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--muted2); margin-bottom: 4px;
   }
-  /* tablolar */
-  .stDataFrame th { white-space: nowrap; }
-  /* sepet rozeti */
-  .sepet-badge {
-    display:inline-block; background:#1d4ed8; color:#fff;
-    border-radius:999px; padding:2px 8px; font-size:0.75rem; font-weight:700;
+  .fy-card .val { font-size: 1.45rem; font-weight: 700; color: var(--text); }
+  .fy-card .sub { font-size: 0.85rem; color: var(--muted); margin-top: 2px; }
+  .fy-pos { color: var(--pos) !important; }
+  .fy-neg { color: var(--neg) !important; }
+  .fy-hero {
+    background: linear-gradient(120deg, #0f2744, #163a2a 40%, #0e4d6b);
+    border: 1px solid #1e3d32; border-radius: 16px;
+    padding: 18px 20px; margin-bottom: 14px; box-shadow: var(--shadow);
   }
+  .fy-hero h2 { margin: 0 0 4px; color: var(--text); font-size: 1.25rem; }
+  .fy-hero p { margin: 0; color: var(--muted); font-size: 0.9rem; }
+
+  /* Benchmark panel */
+  .bm-panel {
+    background: linear-gradient(160deg, #0f172a, #132337);
+    border: 1px solid var(--line); border-radius: 16px;
+    padding: 18px 20px; margin: 12px 0 18px; box-shadow: var(--shadow);
+  }
+  .bm-panel h3 {
+    margin: 0 0 12px; font-size: 1.05rem; color: var(--text);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .bm-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 999px; padding: 4px 12px; font-size: 0.8rem; color: var(--muted);
+    margin-right: 6px; margin-bottom: 6px;
+  }
+  .bm-chip strong { color: var(--text); }
+  .rb-bar-wrap { margin: 8px 0 12px; }
+  .rb-label {
+    display: flex; justify-content: space-between; font-size: 0.85rem;
+    color: var(--muted); margin-bottom: 4px;
+  }
+  .rb-label b { color: var(--text); }
+
+
+  .sticky-strip {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    background: linear-gradient(90deg, #0f172aee, #132337ee);
+    border: 1px solid var(--line); border-radius: 14px;
+    padding: 10px 14px; margin: 8px 0 14px;
+    backdrop-filter: blur(8px); box-shadow: var(--shadow);
+  }
+  .sticky-item {
+    min-width: 90px; padding: 4px 10px; border-right: 1px solid var(--line2);
+  }
+  .sticky-item:last-child { border-right: none; }
+  .sticky-strip .sk {
+    font-size: 0.7rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted2);
+  }
+  .sticky-strip .sv { font-size: 0.98rem; font-weight: 700; color: var(--text); }
+
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; }
+  ::-webkit-scrollbar-track { background: var(--bg2); }
 </style>
 """,
     unsafe_allow_html=True,
 )
+
+
 
 # ── Session state ───────────────────────────────────────────────────────────
 def _init_state():
@@ -1342,6 +1497,330 @@ def birlesik_kalite_sinyal_skoru(kalite: dict | None, sinyal: dict | None, tu: d
     return birlesik_profil_skoru(kalite=kalite, sinyal=sinyal, tu=tu)
 
 
+
+def empty_state(baslik: str, aciklama: str, ipucu: str = "") -> None:
+    """Görsel boş durum kutusu."""
+    ip = f'<div style="color:#64748b;font-size:0.8rem">{ipucu}</div>' if ipucu else ""
+    st.markdown(
+        (
+            '<div style="text-align:center;padding:28px 20px;margin:12px 0;'
+            'background:linear-gradient(160deg,#0f172a,#132337);'
+            'border:1px dashed #334155;border-radius:16px;">'
+            '<div style="font-size:1.6rem;margin-bottom:8px">📭</div>'
+            f'<div style="font-size:1.05rem;font-weight:650;color:#f1f5f9;margin-bottom:6px">{baslik}</div>'
+            f'<div style="color:#94a3b8;font-size:0.9rem;max-width:420px;margin:0 auto 8px">{aciklama}</div>'
+            f'{ip}</div>'
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def badge_fk(fk) -> str:
+    """F/K renk eşiği: <10 yeşil, 10-20 sarı, >20 kırmızı."""
+    if fk is None:
+        return "—"
+    try:
+        x = float(fk)
+    except (TypeError, ValueError):
+        return "—"
+    if x < 10:
+        cls, lbl = "badge-ok", "ucuz band"
+    elif x <= 20:
+        cls, lbl = "badge-warn", "orta"
+    else:
+        cls, lbl = "badge-bad", "pahalı band"
+    return f'<span class="badge {cls}">F/K {tr_num(x, 1)} · {lbl}</span>'
+
+
+def badge_skor(v, *, iyi=70, orta=45) -> str:
+    if v is None:
+        return "—"
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if x >= iyi:
+        cls = "badge-ok"
+    elif x >= orta:
+        cls = "badge-warn"
+    else:
+        cls = "badge-bad"
+    return f'<span class="badge {cls}">{tr_num(x, 0)}</span>'
+
+
+def bilanco_momentum(isy: dict | None) -> dict:
+    """Güncel vs YoY aynı dönem: satış / net kâr / borç momentumu."""
+    isy = isy or {}
+    oz = isy.get("ozet") or {}
+    out = {"donem": isy.get("gunce_donem"), "satirlar": [], "skor": 50, "ozet": ""}
+    score = 50
+    labels = [
+        ("hasilat", "Satışlar"),
+        ("brut_kar", "Brüt kâr"),
+        ("esas_faaliyet_kari", "Faaliyet kârı"),
+        ("net_donem_kari", "Net kâr"),
+        ("ozkaynaklar", "Özkaynak"),
+        ("toplam_yukumluluk", "Toplam yükümlülük"),
+    ]
+    for key, lab in labels:
+        it = oz.get(key) or {}
+        if not isinstance(it, dict):
+            continue
+        d = it.get("degisim_%")
+        try:
+            d = float(d) if d is not None else None
+        except (TypeError, ValueError):
+            d = None
+        yon = "—"
+        if d is not None:
+            if key == "toplam_yukumluluk":
+                if d <= 0:
+                    yon, score = "olumlu", score + 6
+                elif d > 15:
+                    yon, score = "olumsuz", score - 8
+                else:
+                    yon = "nötr"
+            else:
+                if d >= 10:
+                    yon, score = "olumlu", score + 8
+                elif d >= 0:
+                    yon, score = "hafif+", score + 3
+                elif d > -10:
+                    yon, score = "hafif−", score - 3
+                else:
+                    yon, score = "olumsuz", score - 8
+        out["satirlar"].append({
+            "Kalem": lab,
+            "Güncel": it.get("deger"),
+            "YoY dönem": it.get("onceki_yoy"),
+            "YoY %": d,
+            "Yön": yon,
+        })
+    score = max(0, min(100, score))
+    out["skor"] = score
+    if score >= 70:
+        out["ozet"] = "Bilanço momentumu güçlü (çoğu kalem YoY iyileşiyor)."
+    elif score >= 45:
+        out["ozet"] = "Bilanço momentumu karışık — kalem bazında ayırın."
+    else:
+        out["ozet"] = "Bilanço momentumu zayıf (kâr/satış baskısı veya borç artışı)."
+    return out
+
+
+
+def mali_tablo_otomatik_yorum(isy: dict | None, deg: dict | None = None) -> dict:
+    """
+    Yeni / güncel bilanço için otomatik yorum:
+    kârlılık, büyüme, borç, nakit, çarpan, momentum.
+    """
+    isy = isy or {}
+    deg = deg or {}
+    oz = isy.get("ozet") or {}
+    oran = isy.get("oranlar") or {}
+    donem = isy.get("gunce_donem") or "—"
+    olumlu, olumsuz, notr, aksiyon = [], [], [], []
+
+    def _g(key):
+        it = oz.get(key) or {}
+        return it if isinstance(it, dict) else {}
+
+    def _f(v):
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    # Satış / kâr büyüme
+    for key, lab in (
+        ("hasilat", "Satışlar"),
+        ("net_donem_kari", "Net kâr"),
+        ("esas_faaliyet_kari", "Faaliyet kârı"),
+        ("brut_kar", "Brüt kâr"),
+    ):
+        d = _f(_g(key).get("degisim_%"))
+        if d is None:
+            continue
+        if d >= 20:
+            olumlu.append(f"**{lab}** YoY **%{tr_num(d,1)}** — güçlü büyüme ({donem}).")
+        elif d >= 0:
+            notr.append(f"**{lab}** YoY **%{tr_num(d,1)}** — enflasyon altında kalabilir.")
+        elif d > -15:
+            olumsuz.append(f"**{lab}** YoY **%{tr_num(d,1)}** — hafif gerileme.")
+        else:
+            olumsuz.append(f"**{lab}** YoY **%{tr_num(d,1)}** — belirgin baskı.")
+
+    roe = _f(oran.get("ROE_%")) or _f(deg.get("ROE"))
+    if roe is not None:
+        if roe >= 20:
+            olumlu.append(f"**ROE %{tr_num(roe,1)}** yüksek — özkaynak verimi güçlü.")
+        elif roe >= 10:
+            notr.append(f"**ROE %{tr_num(roe,1)}** makul band.")
+        elif roe > 0:
+            olumsuz.append(f"**ROE %{tr_num(roe,1)}** düşük.")
+        else:
+            olumsuz.append(f"**ROE %{tr_num(roe,1)}** negatif — zarar dönemi.")
+
+    marj = _f(oran.get("net_kar_marji_%"))
+    if marj is not None:
+        if marj >= 15:
+            olumlu.append(f"Net marj **%{tr_num(marj,1)}**.")
+        elif marj < 5:
+            olumsuz.append(f"Net marj **%{tr_num(marj,1)}** dar.")
+
+    borc = _f(oran.get("borc_ozkaynak")) or _f(deg.get("borç/özkaynak"))
+    if borc is not None:
+        if borc <= 0.5:
+            olumlu.append(f"Borç/özkaynak **{tr_num(borc,2)}** düşük kaldıraç.")
+        elif borc <= 1.2:
+            notr.append(f"Borç/özkaynak **{tr_num(borc,2)}** yönetilebilir.")
+        else:
+            olumsuz.append(f"Borç/özkaynak **{tr_num(borc,2)}** yüksek — faiz/refinansman riski.")
+            aksiyon.append("Borç vadesi ve faiz yükünü kontrol edin.")
+
+    cari = _f(oran.get("cari_oran"))
+    if cari is not None:
+        if cari >= 1.5:
+            olumlu.append(f"Cari oran **{tr_num(cari,2)}** — kısa vade likidite rahat.")
+        elif cari < 1.0:
+            olumsuz.append(f"Cari oran **{tr_num(cari,2)}** — kısa vadeli baskı.")
+            aksiyon.append("KV yükümlülük / nakit dengesini izleyin.")
+
+    nakit = _f(_g("nakit").get("deger"))
+    # nakit değişim
+    nd = _f(_g("nakit").get("degisim_%"))
+    if nd is not None:
+        if nd >= 10:
+            olumlu.append(f"Nakit pozisyonu YoY **%{tr_num(nd,1)}** artmış.")
+        elif nd <= -20:
+            olumsuz.append(f"Nakit YoY **%{tr_num(nd,1)}** gerilemiş.")
+
+    fk = _f(deg.get("F/K"))
+    if fk is not None:
+        if fk < 8:
+            olumlu.append(f"F/K **{tr_num(fk,1)}** düşük band (ucuz görünüm — sektör ile doğrulayın).")
+        elif fk > 25:
+            olumsuz.append(f"F/K **{tr_num(fk,1)}** yüksek band — büyüme beklentisi fiyatlanmış olabilir.")
+            aksiyon.append("Sektör F/K medyanı ile kıyaslayın.")
+        else:
+            notr.append(f"F/K **{tr_num(fk,1)}** orta band.")
+
+    pddd = _f(deg.get("PD/DD"))
+    if pddd is not None:
+        if pddd < 1:
+            olumlu.append(f"PD/DD **{tr_num(pddd,2)}** defter altı.")
+        elif pddd > 3:
+            olumsuz.append(f"PD/DD **{tr_num(pddd,2)}** primli.")
+
+    mom = bilanco_momentum(isy)
+    if mom.get("skor", 50) >= 70:
+        olumlu.append(f"Bilanço momentum skoru **{mom['skor']}/100** — {mom.get('ozet','')}")
+    elif mom.get("skor", 50) < 45:
+        olumsuz.append(f"Bilanço momentum skoru **{mom['skor']}/100** — {mom.get('ozet','')}")
+        aksiyon.append("Zarar eden kalemleri ve borç değişimini derinlemesine bakın.")
+
+    # Özet paragraf
+    n_ol = len(olumlu)
+    n_olms = len(olumsuz)
+    if n_ol >= n_olms + 2:
+        sonuc = f"**{donem}** bilançosu genel olarak **olumlu** okunuyor ({n_ol} artı / {n_olms} eksi)."
+    elif n_olms >= n_ol + 2:
+        sonuc = f"**{donem}** bilançosu **temkinli** okunmalı ({n_olms} eksi / {n_ol} artı)."
+    else:
+        sonuc = f"**{donem}** bilançosu **karışık** — kalem bazında ayırım gerekli."
+
+    if not aksiyon:
+        aksiyon.append("Sonraki çeyrek satış/marj trendini ve net borç değişimini takip edin.")
+
+    return {
+        "donem": donem,
+        "sonuc": sonuc,
+        "olumlu": olumlu,
+        "olumsuz": olumsuz,
+        "notr": notr,
+        "aksiyon": aksiyon,
+        "momentum_skor": mom.get("skor"),
+    }
+
+
+def render_otomatik_bilanco_yorum(yorum: dict, *, baslik: str = "Otomatik bilanço yorumu") -> None:
+    if not yorum:
+        return
+    st.markdown(f"##### 📝 {baslik}")
+    st.info(yorum.get("sonuc") or "")
+    c1, c2 = st.columns(2)
+    with c1:
+        if yorum.get("olumlu"):
+            st.success("**Olumlu**\n\n" + "\n".join(f"- {x}" for x in yorum["olumlu"][:8]))
+        if yorum.get("notr"):
+            st.caption("Nötr: " + " · ".join(yorum["notr"][:4]))
+    with c2:
+        if yorum.get("olumsuz"):
+            st.warning("**Olumsuz / risk**\n\n" + "\n".join(f"- {x}" for x in yorum["olumsuz"][:8]))
+        if yorum.get("aksiyon"):
+            st.markdown("**İzleme**\n\n" + "\n".join(f"- {x}" for x in yorum["aksiyon"][:5]))
+    st.caption(f"Dönem: **{yorum.get('donem')}** · momentum {yorum.get('momentum_skor', '—')}/100 · otomatik kural motoru — tavsiye değildir.")
+
+
+def hazir_profil_filtrele(df: pd.DataFrame, profil: str) -> pd.DataFrame:
+    """Dengeli / Değer / Kalite / Momentum / Taze bilanço."""
+    if df is None or getattr(df, "empty", True):
+        return df
+    d = df.copy()
+    profil = (profil or "Dengeli").strip()
+
+    def _num(s):
+        return pd.to_numeric(s, errors="coerce")
+
+    for col, alias in (
+        ("F/K", "_fk"), ("PD/DD", "_pddd"), ("kalite_skor", "_kal"),
+        ("ucuzluk_skor", "_uc"), ("model_sinyal", "_sig"), ("birlesik_ortalama", "_bir"),
+    ):
+        if col in d.columns:
+            d[alias] = _num(d[col])
+    if "bilanco_donem" in d.columns:
+        d["_don"] = d["bilanco_donem"].astype(str)
+
+    if profil == "Değer":
+        if "_fk" in d.columns:
+            d = d[(d["_fk"].isna()) | (d["_fk"] <= 15)]
+        if "_uc" in d.columns:
+            d = d.sort_values(["_uc", "_fk"] if "_fk" in d.columns else ["_uc"], ascending=[False, True] if "_fk" in d.columns else [False], na_position="last")
+        elif "_bir" in d.columns:
+            d = d.sort_values("_bir", ascending=False, na_position="last")
+    elif profil == "Kalite":
+        if "_kal" in d.columns:
+            d = d[(d["_kal"].isna()) | (d["_kal"] >= 55)].sort_values("_kal", ascending=False, na_position="last")
+        elif "_bir" in d.columns:
+            d = d.sort_values("_bir", ascending=False, na_position="last")
+    elif profil == "Momentum":
+        if "_sig" in d.columns:
+            d = d.sort_values("_sig", ascending=False, na_position="last")
+        elif "_bir" in d.columns:
+            d = d.sort_values("_bir", ascending=False, na_position="last")
+    elif profil == "Taze bilanço":
+        if "_don" in d.columns:
+            y = datetime.now().year
+            d["_taze"] = d["_don"].str.contains(str(y), na=False).astype(int)
+            cols = ["_taze"] + (["_bir"] if "_bir" in d.columns else [])
+            asc = [False] * len(cols)
+            d = d.sort_values(cols, ascending=asc, na_position="last")
+        elif "_bir" in d.columns:
+            d = d.sort_values("_bir", ascending=False, na_position="last")
+    elif profil == "Düşük kaldıraç":
+        # PD/DD ve kalite; borç kolonu yoksa kalite+birleşik
+        if "_pddd" in d.columns:
+            d = d[(d["_pddd"].isna()) | (d["_pddd"] <= 2.5)]
+        if "_kal" in d.columns:
+            d = d.sort_values(["_kal", "_bir"] if "_bir" in d.columns else ["_kal"], ascending=[False, False] if "_bir" in d.columns else [False], na_position="last")
+        elif "_bir" in d.columns:
+            d = d.sort_values("_bir", ascending=False, na_position="last")
+    else:
+        if "_bir" in d.columns:
+            d = d.sort_values("_bir", ascending=False, na_position="last")
+
+    return d.drop(columns=[c for c in d.columns if c.startswith("_")], errors="ignore")
+
+
 def hisse_birlesik_satir(kod: str, *, force_isy: bool = False) -> dict:
     """Tek hisse: kalite + sinyal + tarihsel ucuzluk + eşit ağırlıklı ortalama."""
     kod = str(kod).upper().replace(".IS", "").strip()
@@ -2330,6 +2809,45 @@ def render_bilanco_bildirim_paneli():
         st.markdown("#### 🟢 Önceki bilançoya göre iyileşenler")
         for msg in iyilesme[:15]:
             st.success(msg)
+
+    # Yeni dönem geldiyse izleme listesi otomatik yorum
+    st.markdown("#### 🤖 Yeni bilanço — otomatik yorum")
+    st.caption(
+        "İzleme listesindeki hisselerde İş Yatırım güncel dönem çekilir; "
+        "satış/kâr/borç/F/K kurallarıyla yorum üretilir. Tavsiye değildir."
+    )
+    izleme = st.text_input(
+        "İzleme listesi (virgülle)",
+        value=st.session_state.get("bilanco_izleme", "ISDMR,THYAO,GARAN,EREGL,ASELS,TUPRS"),
+        key="bilanco_izleme",
+    )
+    if st.button("Bilanço yorumlarını üret", type="primary", key="btn_bilanco_yorum"):
+        kodlar = [k.strip().upper().replace(".IS", "") for k in izleme.split(",") if k.strip()]
+        yorumlar = []
+        bar = st.progress(0.0)
+        for i, k in enumerate(kodlar):
+            try:
+                isy = isyatirim_mali_tablo(k, force=False)
+                deg = {}
+                try:
+                    ic = deg_from_isyatirim(k)
+                    if not ic.get("_error"):
+                        deg = ic
+                except Exception:
+                    pass
+                y = mali_tablo_otomatik_yorum(isy if isinstance(isy, dict) else {}, deg)
+                y["kod"] = k
+                yorumlar.append(y)
+            except Exception as e:
+                yorumlar.append({"kod": k, "sonuc": f"Hata: {e}", "olumlu": [], "olumsuz": [], "notr": [], "aksiyon": []})
+            bar.progress((i + 1) / max(len(kodlar), 1))
+        bar.empty()
+        st.session_state["_ana_bilanco_yorumlar"] = yorumlar
+
+    for y in (st.session_state.get("_ana_bilanco_yorumlar") or []):
+        with st.expander(f"{y.get('kod')} · {y.get('donem') or '—'} · {str(y.get('sonuc') or '')[:80]}", expanded=False):
+            render_otomatik_bilanco_yorum(y, baslik=f"{y.get('kod')} bilanço yorumu")
+
     return bild
 
 
@@ -4889,17 +5407,22 @@ elif sayfa == "🧪 Filtre Stüdyosu":
         st.caption("tefas_filtre modülünü kontrol edin.")
 
     st.markdown("---")
-    st.markdown("### Hazır profil — birleşik skor (kalite + sinyal + ucuzluk, eşit ağırlık)")
+    st.markdown("### Hazır profil — birleşik skor + filtre")
     st.caption(
-        "Kalite + model sinyal + **tarihsel ucuzluk** eşit ağırlıkla ortalanır; "
-        "en yüksekten en düşüğe sıralanır. Yatırım tavsiyesi değildir."
+        "**Dengeli** · **Değer** (F/K≤15) · **Kalite** · **Momentum** · **Taze bilanço**. Tavsiye değildir."
+    )
+    fs_prof = st.radio(
+        "Hazır profil",
+        ["Dengeli", "Değer", "Kalite", "Momentum", "Taze bilanço", "Düşük kaldıraç"],
+        horizontal=True,
+        key="fs_hazir_profil",
     )
     fs_list = st.text_input(
-        "Hisse kodları (virgülle) — hazır profil",
-        value="ISDMR,THYAO,GARAN,EREGL,ASELS,SISE,KCHOL,TUPRS",
+        "Hisse kodları (virgülle)",
+        value="ISDMR,THYAO,GARAN,EREGL,ASELS,SISE,KCHOL,TUPRS,ARCLK,TCELL",
         key="fs_birlesik_list",
     )
-    if st.button("Birleşik skor sırala (yüksek → düşük)", key="btn_fs_birlesik"):
+    if st.button("Profili uygula / sırala", type="primary", key="btn_fs_birlesik"):
         kodlar = [k.strip().upper().replace(".IS", "") for k in fs_list.split(",") if k.strip()]
         rows = []
         bar = st.progress(0.0)
@@ -4910,10 +5433,9 @@ elif sayfa == "🧪 Filtre Stüdyosu":
                 rows.append({"kod": k, "ad": k, "birlesik_ortalama": None, "hata": str(e)})
             bar.progress((i + 1) / max(len(kodlar), 1))
         bar.empty()
-        dfb = pd.DataFrame(rows)
-        if "birlesik_ortalama" in dfb.columns:
-            dfb = dfb.sort_values("birlesik_ortalama", ascending=False, na_position="last")
+        dfb = hazir_profil_filtrele(pd.DataFrame(rows), fs_prof)
         st.session_state["fs_birlesik_df"] = dfb
+        st.session_state["fs_birlesik_profil"] = fs_prof
     dfb = st.session_state.get("fs_birlesik_df")
     if dfb is not None and not getattr(dfb, "empty", True):
         show_cols = [
@@ -4931,7 +5453,7 @@ elif sayfa == "🧪 Filtre Stüdyosu":
             meta={"mod": "birlesik_kalite_sinyal", "siralama": "yuksek_dusuk"},
             key="xl_fs_birlesik",
         )
-        st.caption("Sıra: birleşik ortalama yüksek → düşük.")
+        st.caption(f"Profil: **{st.session_state.get('fs_birlesik_profil', 'Dengeli')}**. Tavsiye değildir.")
 
 elif sayfa == "⚖️ Karşılaştırma":
     st.header("⚖️ Karşılaştırma — Fon + Hisse")
@@ -5922,33 +6444,7 @@ elif sayfa == "📁 Portföy":
 
 elif sayfa == "💼 Portföyüm":
     # Fonaly tarzı takip + Excel yükleme (fon.xlsx Özet/Lotlar) + düzenleme
-    st.markdown(
-        """
-        <style>
-        .fy-card {
-            background: linear-gradient(145deg,#121a24,#0d141c);
-            border: 1px solid #1e2a3a; border-radius: 14px;
-            padding: 14px 16px; margin-bottom: 10px;
-        }
-        .fy-card .lbl {
-            font-size: 0.72rem; letter-spacing: .06em; text-transform: uppercase;
-            color: #7a8fa6; margin-bottom: 4px;
-        }
-        .fy-card .val { font-size: 1.45rem; font-weight: 700; color: #e8eef6; }
-        .fy-card .sub { font-size: 0.85rem; color: #8fa3b8; margin-top: 2px; }
-        .fy-pos { color: #3ddc97 !important; }
-        .fy-neg { color: #ff6b6b !important; }
-        .fy-hero {
-            background: linear-gradient(120deg,#0f2744,#163a2a);
-            border: 1px solid #1e3d32; border-radius: 16px;
-            padding: 16px 18px; margin-bottom: 12px;
-        }
-        .fy-hero h2 { margin: 0 0 4px; color: #e8eef6; font-size: 1.2rem; }
-        .fy-hero p { margin: 0; color: #9bb0c4; font-size: 0.9rem; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+
 
     if "sanal_portfoy" not in st.session_state:
         st.session_state.sanal_portfoy = {
@@ -6236,7 +6732,7 @@ elif sayfa == "💼 Portföyüm":
         ])
         with tab_g:
             if not poz:
-                st.info("Excel yükleyin veya düzenlemeden fon ekleyin.")
+                empty_state("Portföy boş", "Excel (Özet / Lotlar) yükleyin veya kod listesi ekleyin.", "Örnek dosya: fon.xlsx")
             else:
                 rows = []
                 for kod, p in poz.items():
@@ -6896,7 +7392,176 @@ elif sayfa == "💼 Portföyüm":
                     "Kategori/risk ad tahminidir (fon unvanından); resmi TEFAS şeması değildir."
                 )
 
-    # ── Portföyü analiz et + güçlü / uyarı / akıllı tavsiye ──
+
+    # ── Benchmark + Rebalance ──
+    if poz and deger_toplam > 0:
+        st.markdown(
+            '<div class="bm-panel"><h3>📐 Benchmark & yeniden dengeleme</h3>'
+            '<p style="margin:0 0 12px;color:#94a3b8;font-size:0.9rem">'
+            'Portföy getirinizi referanslarla kıyaslayın; hedef ağırlığa göre sapma ve rebalance önerisi alın. '
+            'Yatırım tavsiyesi değildir.</p></div>',
+            unsafe_allow_html=True,
+        )
+        bc1, bc2, bc3 = st.columns([1.2, 1, 1])
+        with bc1:
+            bm_sec = st.multiselect(
+                "Benchmark",
+                ["BIST100", "Mevduat ~TÜFE+", "Nakit (0%)"],
+                default=["BIST100"],
+                key="fy_bm_sel",
+            )
+        with bc2:
+            rb_mod = st.selectbox(
+                "Rebalance hedefi",
+                ["Eşit ağırlık", "Mevcut ağırlığı koru (sapma göster)", "Max % tavan"],
+                key="fy_rb_mod",
+            )
+        with bc3:
+            max_w_rb = st.slider("Tek fon tavan %", 10, 40, 20, key="fy_rb_cap")
+
+        if st.button("Benchmark & rebalance hesapla", type="primary", key="fy_bm_btn"):
+            st.session_state["_fy_bm_run"] = True
+            st.session_state["_fy_aylik_calc"] = True
+
+        if st.session_state.get("_fy_bm_run"):
+            # Fiili ağırlıklar
+            w_act = {}
+            for kod, p in poz.items():
+                adet = float(p.get("adet") or 0)
+                px = fiyatlar.get(kod) or float(p.get("maliyet") or 0)
+                w_act[kod] = (adet * px) / deger_toplam if deger_toplam else 0
+
+            # Hedef ağırlık
+            n = len(w_act) or 1
+            if rb_mod == "Eşit ağırlık":
+                w_tgt = {k: 1.0 / n for k in w_act}
+            elif rb_mod == "Max % tavan":
+                cap = max_w_rb / 100.0
+                raw = {k: min(w_act[k], cap) for k in w_act}
+                s = sum(raw.values()) or 1
+                # tavan üstü kalanı eşit dağıt
+                overflow = 1.0 - s
+                low = [k for k in w_act if w_act[k] < cap]
+                if low and overflow > 0:
+                    add = overflow / len(low)
+                    for k in low:
+                        raw[k] = min(cap, raw[k] + add)
+                    s2 = sum(raw.values()) or 1
+                    w_tgt = {k: raw[k] / s2 for k in raw}
+                else:
+                    w_tgt = {k: raw[k] / s for k in raw}
+            else:
+                w_tgt = dict(w_act)
+
+            # Sapma tablosu
+            rows_rb = []
+            for kod in w_act:
+                a, t = w_act[kod] * 100, w_tgt.get(kod, 0) * 100
+                sap = a - t
+                rows_rb.append({
+                    "kod": kod,
+                    "fiili_%": round(a, 2),
+                    "hedef_%": round(t, 2),
+                    "sapma_%": round(sap, 2),
+                    "aksiyon": (
+                        "Azalt" if sap > 1.5 else ("Artır" if sap < -1.5 else "Tut")
+                    ),
+                    "₺ fark": round(deger_toplam * (t - a) / 100.0, 0),
+                })
+            rbdf = pd.DataFrame(rows_rb).sort_values("sapma_%", key=lambda s: s.abs(), ascending=False)
+
+            st.markdown("##### Ağırlık sapması")
+            rb_show = rbdf.copy()
+            for c in ("fiili_%", "hedef_%", "sapma_%", "₺ fark"):
+                rb_show[c] = rb_show[c].map(lambda x: tr_num(x, 2 if c != "₺ fark" else 0, force_sign=(c == "sapma_%")))
+            st.dataframe(rb_show, hide_index=True, use_container_width=True, height=280)
+
+            # progress bars for top drifts
+            st.markdown("##### Sapma çubukları")
+            for _, rr in rbdf.head(8).iterrows():
+                st.markdown(
+                    f'<div class="rb-label"><span><b>{rr["kod"]}</b> · {rr["aksiyon"]}</span>'
+                    f'<span>fiili %{tr_num(rr["fiili_%"],1)} → hedef %{tr_num(rr["hedef_%"],1)}</span></div>',
+                    unsafe_allow_html=True,
+                )
+                st.progress(min(1.0, abs(float(rr["fiili_%"])) / 100.0))
+
+            # Benchmark getiri (seri varsa)
+            port_nav = st.session_state.get("_fy_port_nav")
+            chips = []
+            if port_nav is not None and len(port_nav) > 5:
+                pret = float(port_nav.iloc[-1] / port_nav.iloc[0] * 100 - 100)
+                chips.append(f'<span class="bm-chip">Portföy <strong>%{tr_num(pret, 1)}</strong> (seri)</span>')
+            else:
+                chips.append(
+                    f'<span class="bm-chip">Portföy maliyet K/Z <strong>%{tr_num(acik_kz_pct, 1)}</strong></span>'
+                )
+                pret = acik_kz_pct
+
+            # BIST100
+            if "BIST100" in bm_sec:
+                bist_ret = None
+                try:
+                    import yfinance as yf
+                    bh = yf.Ticker("XU100.IS").history(period="1y", auto_adjust=True)
+                    if bh is not None and not bh.empty and len(bh) > 5:
+                        bist_ret = float(bh["Close"].iloc[-1] / bh["Close"].iloc[0] * 100 - 100)
+                except Exception:
+                    pass
+                if bist_ret is not None:
+                    fark = pret - bist_ret
+                    chips.append(
+                        f'<span class="bm-chip">BIST100 <strong>%{tr_num(bist_ret, 1)}</strong></span>'
+                    )
+                    chips.append(
+                        f'<span class="bm-chip">Fark <strong style="color:{"#3ddc97" if fark>=0 else "#ff6b6b"}">%{tr_num(fark, 1, force_sign=True)}</strong></span>'
+                    )
+                else:
+                    chips.append('<span class="bm-chip">BIST100 veri yok</span>')
+
+            if "Mevduat ~TÜFE+" in bm_sec:
+                try:
+                    tufe = float((st.session_state.cfg or {}).get("tufe_yillik") or 40)
+                except Exception:
+                    tufe = 40.0
+                mev = tufe + 5  # kaba proxy
+                chips.append(
+                    f'<span class="bm-chip">Mevduat~TÜFE+5 <strong>%{tr_num(mev, 1)}</strong></span>'
+                )
+                chips.append(
+                    f'<span class="bm-chip">Portföy−mevduat <strong>%{tr_num(pret - mev, 1, force_sign=True)}</strong></span>'
+                )
+            if "Nakit (0%)" in bm_sec:
+                chips.append(
+                    f'<span class="bm-chip">Nakit 0% · reel ≈ <strong>%{tr_num(pret, 1, force_sign=True)}</strong></span>'
+                )
+
+            st.markdown("".join(chips), unsafe_allow_html=True)
+            st.caption(
+                "BIST100: yfinance XU100.IS ~1Y. Mevduat: Ayarlar TÜFE + 5 puan (yaklaşık). "
+                "Rebalance: hedef ağırlığa ₺ fark kadar al/sat simülasyonu — gerçek emir değil."
+            )
+
+            # Tek tık eşit ağırlık uygula
+            if rb_mod == "Eşit ağırlık" and st.button("Eşit ağırlığı portföye uygula (takip)", key="fy_rb_apply"):
+                pxm = fiyatlar
+                poz2 = {}
+                pay = deger_toplam / n
+                for kod in w_act:
+                    px = pxm.get(kod) or float(poz[kod].get("maliyet") or 1)
+                    if px <= 0:
+                        px = 1.0
+                    poz2[kod] = {
+                        "adet": pay / px,
+                        "maliyet": float(poz[kod].get("maliyet") or px),
+                        "ad": poz[kod].get("ad") or kod,
+                    }
+                sp["pozisyonlar"] = poz2
+                st.session_state.sanal_portfoy = sp
+                st.success("Eşit ağırlık uygulandı (takip tutarı korundu).")
+                st.rerun()
+
+        # ── Portföyü analiz et + güçlü / uyarı / akıllı tavsiye ──
     st.markdown("---")
     st.markdown("### 🧠 Portföy analizi · güçlü yönler · uyarılar · akıllı tavsiye")
     cbtn1, cbtn2 = st.columns([1, 1])
@@ -7696,17 +8361,23 @@ elif sayfa == "🏦 BIST Değerleme":
         for y in tu.get("yorum") or []:
             st.markdown(f"- {y}")
 
-    st.markdown("#### Hazır profil — birleşik skor (kalite + sinyal + ucuzluk, eşit ağırlık)")
+    st.markdown("#### Hazır profil — birleşik skor + filtre")
     st.caption(
-        "Kalite + model sinyal + tarihsel ucuzluk **eşit ağırlık** ortalaması; "
-        "**yüksekten düşüğe** sıralanır. BIST / Filtre Stüdyosu hazır profil mantığı."
+        "**Dengeli** · **Değer** (F/K≤15) · **Kalite** (≥55) · **Momentum** · **Taze bilanço**. "
+        "Kalite+sinyal+ucuzluk eşit ağırlık. Tavsiye değildir."
+    )
+    bist_prof = st.radio(
+        "Hazır profil",
+        ["Dengeli", "Değer", "Kalite", "Momentum", "Taze bilanço", "Düşük kaldıraç"],
+        horizontal=True,
+        key="bist_hazir_profil",
     )
     bist_list = st.text_input(
         "Profil hisse listesi",
-        value="ISDMR,THYAO,GARAN,EREGL,ASELS,SISE,KCHOL,TUPRS,BIMAS,SAHOL",
+        value="ISDMR,THYAO,GARAN,EREGL,ASELS,SISE,KCHOL,TUPRS,BIMAS,SAHOL,ARCLK,TCELL",
         key="bist_birlesik_list",
     )
-    if st.button("Birleşik skor sırala (yüksek → düşük)", key="btn_bist_birlesik"):
+    if st.button("Profili uygula / sırala", type="primary", key="btn_bist_birlesik"):
         kodlar = [k.strip().upper().replace(".IS", "") for k in bist_list.split(",") if k.strip()]
         rows = []
         bar = st.progress(0.0)
@@ -7717,10 +8388,9 @@ elif sayfa == "🏦 BIST Değerleme":
                 rows.append({"kod": k, "ad": k, "birlesik_ortalama": None, "hata": str(e)})
             bar.progress((i + 1) / max(len(kodlar), 1))
         bar.empty()
-        dfb = pd.DataFrame(rows)
-        if "birlesik_ortalama" in dfb.columns:
-            dfb = dfb.sort_values("birlesik_ortalama", ascending=False, na_position="last")
+        dfb = hazir_profil_filtrele(pd.DataFrame(rows), bist_prof)
         st.session_state["bist_birlesik_df"] = dfb
+        st.session_state["bist_birlesik_profil"] = bist_prof
     dfb = st.session_state.get("bist_birlesik_df")
     if dfb is not None and not getattr(dfb, "empty", True):
         show_cols = [
@@ -8538,7 +9208,7 @@ elif sayfa == "🔎 Hisse Detay":
 
     det = st.session_state.get("hisse_detay_sonuc")
     if not det:
-        st.info("Hisse kodu girip **Analiz et**’e basın. Örnek: THYAO, GARAN, EREGL, TUPRS, ASELS.")
+        empty_state("Henüz hisse seçilmedi", "Kod girip Analiz et ile İş Yatırım bilanço ve skorlar gelir.", "Örnek: ISDMR · THYAO · GARAN · EREGL")
     else:
         m = det.get("metrikler") or {}
         info = det.get("info") or {}
@@ -8648,6 +9318,52 @@ elif sayfa == "🔎 Hisse Detay":
             k: v for k, v in (_core_bil or {}).items()
             if k not in ("bilanco_df", "gelir_df", "nakit_df")
         }
+
+        # Skorlar + sticky özet şeridi
+        try:
+            _kal_s = bilanco_kalite_skoru(_core_bil if isinstance(_core_bil, dict) else {}, deg)
+            _tu_s = tarihsel_ucuzluk_analizi(kod, fd=det.get("fiyat_df"), deg=deg)
+            _sig_s = model_sinyal_skoru(m=m, deg=deg, kalite=_kal_s, tu=_tu_s)
+            _bir_s = birlesik_profil_skoru(kalite=_kal_s, sinyal=_sig_s, tu=_tu_s)
+            _mom_s = bilanco_momentum(_core_bil if isinstance(_core_bil, dict) else {})
+        except Exception:
+            _kal_s, _tu_s, _sig_s, _bir_s, _mom_s = {}, {}, {}, {}, {}
+
+        _fk_v = deg.get("F/K")
+        _pddd_v = deg.get("PD/DD")
+        _don_v = (_bil or {}).get("etiket") or "—"
+        _bir_v = (_bir_s or {}).get("birlesik")
+        _kal_v = (_kal_s or {}).get("skor")
+        _mom_v = (_mom_s or {}).get("skor")
+
+        st.markdown(
+            (
+                '<div class="sticky-strip">'
+                f'<div class="sticky-item"><div class="sk">Kod</div><div class="sv">{kod}</div></div>'
+                f'<div class="sticky-item"><div class="sk">Bilanço</div><div class="sv">{_don_v}</div></div>'
+                f'<div class="sticky-item"><div class="sk">F/K</div><div class="sv">{tr_num(_fk_v, 1) if _fk_v is not None else "—"}</div></div>'
+                f'<div class="sticky-item"><div class="sk">PD/DD</div><div class="sv">{tr_num(_pddd_v, 2) if _pddd_v is not None else "—"}</div></div>'
+                f'<div class="sticky-item"><div class="sk">Birleşik</div><div class="sv">{tr_num(_bir_v, 0) if _bir_v is not None else "—"}</div></div>'
+                f'<div class="sticky-item"><div class="sk">Kalite</div><div class="sv">{tr_num(_kal_v, 0) if _kal_v is not None else "—"}</div></div>'
+                f'<div class="sticky-item"><div class="sk">Momentum</div><div class="sv">{tr_num(_mom_v, 0) if _mom_v is not None else "—"}</div></div>'
+                f'<div class="sticky-item">{badge_fk(_fk_v)}</div>'
+                '</div>'
+            ),
+            unsafe_allow_html=True,
+        )
+
+        # Bilanço momentum özeti (analiz aracı)
+        if _mom_s and _mom_s.get("satirlar"):
+            with st.expander(f"Bilanço momentumu · skor {tr_num(_mom_v, 0)}/100 · {_mom_s.get('ozet') or ''}", expanded=False):
+                mdf = pd.DataFrame(_mom_s["satirlar"]).copy()
+                if "Güncel" in mdf.columns:
+                    mdf["Güncel"] = mdf["Güncel"].map(lambda v: _fmt_tl(v))
+                if "YoY dönem" in mdf.columns:
+                    mdf["YoY dönem"] = mdf["YoY dönem"].map(lambda v: _fmt_tl(v))
+                if "YoY %" in mdf.columns:
+                    mdf["YoY %"] = mdf["YoY %"].map(lambda v: tr_num(v, 1, force_sign=True) if v is not None else "—")
+                st.dataframe(mdf, hide_index=True, use_container_width=True)
+                st.caption("YoY = önceki yıl aynı dönem. Yükümlülük artışında yön ters yorumlanır.")
 
         tab_oz, tab_sk, tab_g, tab_mt, tab_tem, tab_tek, tab_r, tab_d, tab_v, tab_x = st.tabs([
             "🏢 Şirket Özeti",
@@ -9133,6 +9849,19 @@ elif sayfa == "🔎 Hisse Detay":
                     )
                 else:
                     st.caption("YoY değişim verisi yok — reel hesaplanamadı.")
+
+                # Gelişmiş otomatik mali yorum
+                try:
+                    _yorum_mt = mali_tablo_otomatik_yorum(
+                        _core_bil if isinstance(_core_bil, dict) else {},
+                        deg if isinstance(deg, dict) else {},
+                    )
+                    render_otomatik_bilanco_yorum(
+                        _yorum_mt,
+                        baslik=f"Mali tablo analizi · {_gunce}",
+                    )
+                except Exception as _ye:
+                    st.caption(f"Otomatik yorum: {_ye}")
 
                 mt1, mt2, mt3 = st.tabs(["Bilanço", "Gelir tablosu", "Nakit akım"])
                 _birim = st.radio(
