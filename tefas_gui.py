@@ -534,31 +534,60 @@ def sepet_analiz_et(weights: dict | None = None):
 
 
 
-def fmt_num(v, digits=1, suffix=""):
-    if v is None or (isinstance(v, float) and (np.isnan(v) or not np.isfinite(v))):
+def tr_num(v, digits: int = 2, *, suffix: str = "", force_sign: bool = False) -> str:
+    """
+    Tüm rapor / tablo sayıları için TR biçim:
+    binlik ayırıcı nokta, ondalık ayırıcı virgül → 1.234.567,89
+    """
+    if v is None:
         return "—"
     try:
-        return f"{float(v):.{digits}f}{suffix}"
+        if isinstance(v, float) and (np.isnan(v) or not np.isfinite(v)):
+            return "—"
+    except Exception:
+        pass
+    try:
+        x = float(v)
     except (TypeError, ValueError):
         return "—"
+    try:
+        if digits <= 0:
+            s = f"{abs(x):,.0f}"
+        else:
+            s = f"{abs(x):,.{int(digits)}f}"
+        # en-US 1,234,567.89 → TR 1.234.567,89
+        s = s.replace(",", "X").replace(".", ",").replace("X", ".")
+        if x < 0:
+            s = "-" + s
+        elif force_sign and x > 0:
+            s = "+" + s
+        return f"{s}{suffix}"
+    except Exception:
+        return "—"
+
+
+def fmt_num(v, digits=1, suffix=""):
+    """Genel sayı — ondalık/binlik TR ayırıcı."""
+    return tr_num(v, digits=digits, suffix=suffix)
 
 
 def _fmt_tl(v):
-    """TL tutarlarını okunabilir kısalt (mlr / mn)."""
+    """TL tutar — TR ayırıcı + mlr/mn kısaltma."""
     if v is None:
         return "—"
     try:
         x = float(v)
         if abs(x) >= 1e9:
-            return f"{x/1e9:.2f} mlr"
+            return f"{tr_num(x/1e9, 2)} mlr"
         if abs(x) >= 1e6:
-            return f"{x/1e6:.1f} mn"
-        return f"{x:,.0f}"
+            return f"{tr_num(x/1e6, 1)} mn"
+        return tr_num(x, 0 if abs(x) >= 100 else 2)
     except (TypeError, ValueError):
         return "—"
 
 # Eski / eksik deploy'larda NameError olmasın diye alias
 fmt_tl = _fmt_tl
+tr_fmt = tr_num
 
 
 
@@ -666,6 +695,281 @@ def tarihsel_ucuzluk_analizi(sembol: str, fd: pd.DataFrame | None = None, deg: d
         out["yorum"].append(f"Hesap hatası: {e}")
     return out
 
+
+
+
+
+
+
+def mali_yoy_karsilastirma_df(df: pd.DataFrame, col_labels: list | None = None) -> pd.DataFrame:
+    """
+    Güncel dönem vs önceki yıl aynı dönem (ör. 2026/9 vs 2025/9).
+    Kolonlar: kod, kalem, güncel, YoY dönem, fark %, güncel biçimli.
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame()
+    cols = list(col_labels) if col_labels else [c for c in df.columns if c not in ("kod", "kalem")]
+    if not cols:
+        return pd.DataFrame()
+    cur = cols[0]
+    # aynı çeyrek önceki yıl
+    yoy_col = None
+    try:
+        y, p = cur.split("/")
+        y, p = int(y), int(p)
+        cand = f"{y-1}/{p}"
+        if cand in df.columns:
+            yoy_col = cand
+    except Exception:
+        pass
+    if yoy_col is None and len(cols) > 1:
+        yoy_col = cols[1]
+    rows = []
+    for _, r in df.iterrows():
+        a = r.get(cur)
+        b = r.get(yoy_col) if yoy_col else None
+        try:
+            af = float(a) if a is not None and a == a else None
+        except (TypeError, ValueError):
+            af = None
+        try:
+            bf = float(b) if b is not None and b == b else None
+        except (TypeError, ValueError):
+            bf = None
+        pct = None
+        if af is not None and bf not in (None, 0):
+            pct = round((af / bf - 1.0) * 100.0, 1)
+        rows.append({
+            "kod": r.get("kod"),
+            "kalem": r.get("kalem"),
+            cur: af,
+            (yoy_col or "YoY dönem"): bf,
+            "YoY %": pct,
+        })
+    return pd.DataFrame(rows)
+
+
+def reel_satis_karlilik(isy: dict | None, tufe: float | None = None) -> dict:
+    """
+    Nominal YoY satış/kâr − TÜFE = reel büyüme.
+    """
+    isy = isy or {}
+    oz = isy.get("ozet") or {}
+    if tufe is None:
+        try:
+            tufe = float((st.session_state.get("cfg") or {}).get("tufe_yillik") or 0) or None
+        except Exception:
+            tufe = None
+    if tufe is None:
+        tufe = 40.0
+        src = "varsayılan"
+    else:
+        src = "Ayarlar"
+    out = {"tufe": tufe, "tufe_kaynak": src, "donem": isy.get("gunce_donem"), "satirlar": []}
+
+    def _item(key, label):
+        it = oz.get(key) or {}
+        if not isinstance(it, dict):
+            return
+        nom = it.get("degisim_%")
+        try:
+            nom = float(nom) if nom is not None else None
+        except (TypeError, ValueError):
+            nom = None
+        reel = round(nom - float(tufe), 1) if nom is not None else None
+        out["satirlar"].append({
+            "Kalem": label,
+            "Nominal YoY %": nom,
+            "TÜFE %": tufe,
+            "Reel % (nom−TÜFE)": reel,
+            "Yorum": (
+                "Reel büyüme" if reel is not None and reel > 0 else
+                ("Enflasyon altı" if reel is not None else "—")
+            ),
+            "Tutar": it.get("deger"),
+            "YoY tutar": it.get("onceki_yoy"),
+        })
+
+    _item("hasilat", "Satışlar")
+    _item("brut_kar", "Brüt kâr")
+    _item("esas_faaliyet_kari", "Faaliyet kârı")
+    _item("net_donem_kari", "Net kâr")
+    return out
+
+
+def format_mali_df(df: pd.DataFrame, *, birim: str = "mn") -> pd.DataFrame:
+    """
+    Bilanço / gelir tablosu hücre biçimi.
+    - None / NaN → "—"
+    - Büyük tutarlar: mn (milyon) veya mlr (milyar) + TR binlik
+    - Küçük sayılar: ondalıklı
+    kod / kalem kolonları aynen kalır.
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+    out = df.copy()
+    skip = {"kod", "kalem", "itemCode", "itemDesc", "Kalem", "Kod"}
+
+    def _cell(v):
+        if v is None:
+            return "—"
+        try:
+            if isinstance(v, float) and (v != v):  # NaN
+                return "—"
+            if isinstance(v, str):
+                s = v.strip()
+                if s.lower() in ("none", "nan", "", "-"):
+                    return "—"
+                try:
+                    v = float(s.replace(".", "").replace(",", ".")) if s.count(",") == 1 and s.count(".") > 1 else float(s.replace(",", "."))
+                except ValueError:
+                    return s
+            x = float(v)
+        except (TypeError, ValueError):
+            return "—" if str(v).lower() in ("none", "nan") else str(v)
+        if x == 0:
+            return "0"
+        ax = abs(x)
+        sign = "-" if x < 0 else ""
+        if birim == "mlr" or ax >= 1e9:
+            return f"{sign}{ax/1e9:,.2f} mlr".replace(",", "X").replace(".", ",").replace("X", ".")
+        if birim == "mn" or ax >= 1e6:
+            return f"{sign}{ax/1e6:,.2f} mn".replace(",", "X").replace(".", ",").replace("X", ".")
+        if ax >= 1:
+            return f"{sign}{ax:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        return f"{sign}{ax:.4f}".replace(".", ",")
+
+    for c in out.columns:
+        if str(c) in skip:
+            continue
+        # dönem kolonları veya sayısal
+        try:
+            sample = out[c].dropna().head(3)
+            if len(sample) == 0:
+                out[c] = out[c].apply(lambda v: "—" if v is None or (isinstance(v, float) and v != v) else v)
+                continue
+        except Exception:
+            pass
+        out[c] = out[c].map(_cell)
+    return out
+
+
+def isyatirim_carpanlar(kod: str, *, force: bool = False) -> dict:
+    """
+    İş Yatırım şirket kartından F/K, PD/DD, FD/FAVÖK, fiyat, piyasa değeri.
+    Yahoo kullanılmaz — güncel BIST çarpanları için tek kaynak.
+    """
+    import urllib.request
+    import re
+
+    kod = str(kod).upper().replace(".IS", "").strip()
+    bugun = datetime.now().strftime("%Y-%m-%d")
+    cache = st.session_state.setdefault("_isy_carpan_cache", {})
+    if not force and kod in cache and cache[kod].get("_cache_day") == bugun and not cache[kod].get("error"):
+        return cache[kod]
+
+    def parse_tr(s: str):
+        s = (s or "").strip().replace("\xa0", "").replace(" ", "")
+        if not s or s in ("-", "—", "N/A", "n/a"):
+            return None
+        # 48.213,2 → 48213.2 ; 9,8 → 9.8
+        if re.match(r"^-?\d{1,3}(\.\d{3})+(,\d+)?$", s):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", ".")
+        try:
+            return float(s)
+        except ValueError:
+            return None
+
+    def parse_mcap(raw: str):
+        if not raw:
+            return None
+        t = raw.strip().replace("\xa0", " ")
+        mult = 1.0
+        low = t.lower()
+        if "mntl" in low or "mn tl" in low or "mn.tl" in low:
+            mult = 1e6
+        elif "mlrtl" in low or "mlr tl" in low or "mlr.tl" in low:
+            mult = 1e9
+        elif "bntl" in low or "bn tl" in low:
+            mult = 1e9
+        t2 = re.sub(r"[a-zA-ZğüşıöçĞÜŞİÖÇ.]", "", t).strip()
+        # leftover like 48.213,2
+        val = parse_tr(t2.replace(" ", ""))
+        if val is None:
+            # try digits only pattern
+            m = re.search(r"([\d.,]+)", t)
+            if m:
+                val = parse_tr(m.group(1))
+        return val * mult if val is not None else None
+
+    url = f"https://www.isyatirim.com.tr/tr-tr/analiz/hisse/Sayfalar/sirket-karti.aspx?hisse={kod}"
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; TEFAS-GUI/2.4)",
+                "Accept": "text/html,application/xhtml+xml",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        out = {"error": str(e), "kod": kod, "_cache_day": bugun}
+        cache[kod] = out
+        return out
+
+    text = re.sub(r"\s+", " ", html)
+    out = {
+        "kod": kod,
+        "kaynak": "İş Yatırım şirket kartı",
+        "url": url,
+        "_cache_day": bugun,
+    }
+    patterns = {
+        "F/K": [r"<th>\s*F/K\s*</th>\s*<td>\s*([^<]+?)\s*</td>"],
+        "PD/DD": [r"<th>\s*PD/DD\s*</th>\s*<td>\s*([^<]+?)\s*</td>"],
+        "FD/FAVÖK": [r"<th>\s*FD/FAVÖK\s*</th>\s*<td>\s*([^<]+?)\s*</td>"],
+        "FD/Satışlar": [r"<th>\s*FD/Satışlar\s*</th>\s*<td>\s*([^<]+?)\s*</td>"],
+    }
+    for key, pats in patterns.items():
+        for p in pats:
+            m = re.search(p, text, re.I)
+            if m:
+                out[key] = parse_tr(m.group(1))
+                break
+    m = re.search(r"Piyasa Değeri\s*</th>\s*<td>\s*([^<]+?)\s*</td>", text, re.I)
+    if m:
+        out["piyasa_degeri_raw"] = m.group(1).strip()
+        out["piyasa_degeri"] = parse_mcap(m.group(1))
+    for lab, key in [
+        (r"Son Fiyat\s*</th>\s*<td>\s*([^<]+)", "fiyat"),
+        (r"Kapanış\s*</th>\s*<td>\s*([^<]+)", "fiyat"),
+    ]:
+        m = re.search(lab, text, re.I)
+        if m and out.get("fiyat") is None:
+            out["fiyat"] = parse_tr(m.group(1))
+    cache[kod] = out
+    return out
+
+
+def deg_from_isyatirim(kod: str, force: bool = False) -> dict:
+    """Çarpan dict — yalnızca İş Yatırım. Yahoo yok."""
+    c = isyatirim_carpanlar(kod, force=force)
+    if c.get("error"):
+        return {"_error": c.get("error"), "_kaynak": "İş Yatırım"}
+    deg = {
+        "F/K": c.get("F/K"),
+        "PD/DD": c.get("PD/DD"),
+        "FD/FAVÖK": c.get("FD/FAVÖK"),
+        "FD/Satış": c.get("FD/Satışlar"),
+        "fiyat": c.get("fiyat"),
+        "piyasa_değeri": c.get("piyasa_degeri"),
+        "_kaynak": "İş Yatırım şirket kartı",
+        "_url": c.get("url"),
+    }
+    return deg
 
 
 def bilanco_kalite_skoru(isy: dict | None, deg: dict | None = None) -> dict:
@@ -862,6 +1166,103 @@ def model_sinyal_skoru(
 
 
 
+
+def fintables_tarzi_karne(isy: dict | None, deg: dict | None = None, m: dict | None = None) -> dict:
+    """
+    Fintables Karne benzeri: kârlılık, büyüme, borçluluk, değerleme (0–100 alt skorlar).
+    Kaynak: İş Yatırım mali tablo + şirket kartı çarpanları.
+    """
+    isy = isy or {}
+    deg = deg or {}
+    m = m or {}
+    oz = isy.get("ozet") or {}
+    oran = isy.get("oranlar") or {}
+
+    def _f(v):
+        try:
+            if v is None:
+                return None
+            x = float(v)
+            return x if x == x else None
+        except (TypeError, ValueError):
+            return None
+
+    def _oz(key, field="deger"):
+        item = oz.get(key) or {}
+        return _f(item.get(field)) if isinstance(item, dict) else None
+
+    def _oz_yoy(key):
+        item = oz.get(key) or {}
+        return _f(item.get("degisim_%")) if isinstance(item, dict) else None
+
+    roe = _f(oran.get("ROE_%")) or _f(deg.get("ROE"))
+    marj = _f(oran.get("net_kar_marji_%")) or _f(deg.get("net_kar_marjı"))
+    borc = _f(oran.get("borc_ozkaynak")) or _f(deg.get("borç/özkaynak"))
+    if borc is not None and borc > 5:
+        borc = borc / 100.0
+    cari = _f(oran.get("cari_oran")) or _f(deg.get("cari_oran"))
+    fk = _f(deg.get("F/K"))
+    pddd = _f(deg.get("PD/DD"))
+    sat_yoy = _oz_yoy("hasilat")
+    net_yoy = _oz_yoy("net_donem_kari")
+
+    # Kârlılık
+    k = 50.0
+    if roe is not None:
+        k += 20 if roe >= 20 else (10 if roe >= 12 else (-10 if roe < 5 else 0))
+    if marj is not None:
+        k += 15 if marj >= 12 else (8 if marj >= 6 else (-10 if marj < 2 else 0))
+    k = max(0, min(100, round(k, 1)))
+
+    # Büyüme
+    b = 50.0
+    if sat_yoy is not None:
+        b += 20 if sat_yoy >= 30 else (10 if sat_yoy >= 15 else (-15 if sat_yoy < 0 else 0))
+    if net_yoy is not None:
+        b += 15 if net_yoy >= 25 else (8 if net_yoy >= 10 else (-15 if net_yoy < -10 else 0))
+    b = max(0, min(100, round(b, 1)))
+
+    # Borçluluk (yüksek skor = sağlıklı / düşük borç)
+    d = 55.0
+    if borc is not None:
+        d += 25 if borc <= 0.4 else (10 if borc <= 0.8 else (-20 if borc >= 1.5 else -5))
+    if cari is not None:
+        d += 15 if cari >= 1.5 else (-15 if cari < 1 else 0)
+    d = max(0, min(100, round(d, 1)))
+
+    # Değerleme (yüksek = daha ucuz görünüm)
+    v = 50.0
+    if fk is not None and fk > 0:
+        v += 25 if fk < 8 else (10 if fk <= 12 else (-15 if fk > 25 else 0))
+    if pddd is not None and pddd > 0:
+        v += 15 if pddd < 1 else (5 if pddd < 1.5 else (-10 if pddd > 3 else 0))
+    v = max(0, min(100, round(v, 1)))
+
+    genel = round((k + b + d + v) / 4.0, 1)
+    if genel >= 70:
+        harf, yorum = "A", "Karne genel olarak güçlü — yine de sektör ve dipnot kontrol edin."
+    elif genel >= 55:
+        harf, yorum = "B", "Karne orta-üstü; büyümeyi ve borcu birlikte okuyun."
+    elif genel >= 40:
+        harf, yorum = "C", "Karne orta; zayıf alanları (kârlılık/borç/değer) inceleyin."
+    else:
+        harf, yorum = "D", "Karne zayıf — yüksek temkin."
+    return {
+        "karlilik": k,
+        "buyume": b,
+        "borcluluk": d,
+        "degerleme": v,
+        "genel": genel,
+        "harf": harf,
+        "yorum": yorum,
+        "metrikler": {
+            "ROE": roe, "net_marj": marj, "borc_oz": borc, "cari": cari,
+            "F/K": fk, "PD/DD": pddd, "satis_yoy": sat_yoy, "net_yoy": net_yoy,
+        },
+        "kaynak": "İş Yatırım + model karne (Fintables tarzı özet)",
+    }
+
+
 def birlesik_profil_skoru(
     kalite: dict | None = None,
     sinyal: dict | None = None,
@@ -977,13 +1378,21 @@ def hisse_birlesik_satir(kod: str, *, force_isy: bool = False) -> dict:
         except Exception:
             info = {}
         row["ad"] = (info.get("longName") or info.get("shortName") or kod)[:48]
-        deg["F/K"] = info.get("trailingPE")
-        deg["PD/DD"] = info.get("priceToBook")
-        row["F/K"] = deg["F/K"]
-        row["PD/DD"] = deg["PD/DD"]
+        # Yahoo trailingPE KULLANILMAZ
         if info.get("returnOnEquity") is not None:
             row["ROE"] = float(info["returnOnEquity"]) * 100
             deg["ROE"] = row["ROE"]
+    except Exception:
+        pass
+    try:
+        _ic = deg_from_isyatirim(kod)
+        if not _ic.get("_error"):
+            for _ck in ("F/K", "PD/DD", "FD/FAVÖK"):
+                if _ic.get(_ck) is not None:
+                    deg[_ck] = _ic[_ck]
+                    row[_ck] = _ic[_ck]
+            if _ic.get("fiyat") is not None:
+                row["fiyat"] = _ic["fiyat"]
     except Exception:
         pass
     isy = {}
@@ -1015,6 +1424,62 @@ def hisse_birlesik_satir(kod: str, *, force_isy: bool = False) -> dict:
     return row
 
 
+
+def _html_escape(s) -> str:
+    return (
+        str(s if s is not None else "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _svg_bar_chart(labels: list, values: list, title: str = "", width: int = 640, height: int = 220) -> str:
+    """Basit yatay-olmayan dikey bar SVG (bağımlılıksız)."""
+    if not labels or not values or len(labels) != len(values):
+        return ""
+    nums = []
+    for v in values:
+        try:
+            nums.append(float(v) if v is not None else 0.0)
+        except (TypeError, ValueError):
+            nums.append(0.0)
+    if not any(nums):
+        return f"<p class='muted'>{_html_escape(title)}: veri yok</p>"
+    pad_l, pad_r, pad_t, pad_b = 48, 16, 28, 40
+    w = width - pad_l - pad_r
+    h = height - pad_t - pad_b
+    mx = max(abs(x) for x in nums) or 1.0
+    n = len(nums)
+    gap = 8
+    bw = max(12, (w - gap * (n + 1)) / n)
+    bars = []
+    zero_y = pad_t + h  # baseline bottom for positive-only; if negatives, mid
+    has_neg = any(x < 0 for x in nums)
+    if has_neg:
+        zero_y = pad_t + h * (mx / (2 * mx))
+    for i, (lab, val) in enumerate(zip(labels, nums)):
+        x = pad_l + gap + i * (bw + gap)
+        if has_neg:
+            bar_h = abs(val) / (2 * mx) * h
+            y = zero_y - bar_h if val >= 0 else zero_y
+        else:
+            bar_h = (val / mx) * h if mx else 0
+            y = pad_t + h - bar_h
+        color = "#1B4F72" if val >= 0 else "#C0392B"
+        bars.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw:.1f}" height="{max(bar_h,0):.1f}" fill="{color}" rx="3"/>'
+            f'<text x="{x + bw/2:.1f}" y="{height - 12}" text-anchor="middle" font-size="11" fill="#333">{_html_escape(lab)}</text>'
+            f'<text x="{x + bw/2:.1f}" y="{y - 4:.1f}" text-anchor="middle" font-size="10" fill="#555">{_fmt_tl(val)}</text>'
+        )
+    return (
+        f'<div class="chart-wrap"><div class="chart-title">{_html_escape(title)}</div>'
+        f'<svg viewBox="0 0 {width} {height}" width="100%" height="{height}">'
+        f'{"".join(bars)}</svg></div>'
+    )
+
+
 def rapor_paketi_html(
     *,
     baslik: str,
@@ -1023,23 +1488,177 @@ def rapor_paketi_html(
     donem: str = "",
     bloklar: list | None = None,
     meta: dict | None = None,
+    tables: list | None = None,
+    charts: list | None = None,
+    kpi: dict | None = None,
+    fk_yorum: str = "",
 ) -> str:
+    """
+    Kurumsal HTML rapor.
+    tables: [(baslik, headers, rows)]
+    charts: [(baslik, labels, values)]
+    kpi: {etiket: deger}
+    """
     bloklar = bloklar or []
     meta = meta or {}
-    rows = "".join(f"<h2>{h}</h2><div class='blk'>{b}</div>" for h, b in bloklar)
-    meta_s = "".join(f"<li><b>{k}:</b> {v}</li>" for k, v in meta.items() if v is not None)
-    return (
-        "<!DOCTYPE html><html lang='tr'><head><meta charset='utf-8'/>"
-        f"<title>{baslik} — {kod}</title>"
-        "<style>body{font-family:system-ui,sans-serif;max-width:900px;margin:24px auto;padding:0 16px}"
-        "h1{font-size:1.4rem}h2{font-size:1.1rem;margin-top:1.4em;border-bottom:1px solid #ddd}"
-        ".blk{white-space:pre-wrap;line-height:1.45}.warn{background:#fff3cd;padding:10px;border-radius:6px}</style>"
-        "</head><body>"
-        f"<h1>{baslik}</h1>"
-        f"<p><b>{kod}</b> {ad} · dönem: {donem} · {datetime.now().strftime('%d.%m.%Y %H:%M')}</p>"
-        "<div class='warn'>Yatırım tavsiyesi değildir. Veriler TEFAS / İş Yatırım / piyasa kaynaklarından derlenmiştir.</div>"
-        f"<ul>{meta_s}</ul>{rows}</body></html>"
+    tables = tables or []
+    charts = charts or []
+    kpi = kpi or {}
+    ts = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    kpi_html = ""
+    if kpi:
+        cards = []
+        for k, v in kpi.items():
+            cards.append(
+                f'<div class="kpi"><div class="kpi-l">{_html_escape(k)}</div>'
+                f'<div class="kpi-v">{_html_escape(v)}</div></div>'
+            )
+        kpi_html = f'<div class="kpi-row">{"".join(cards)}</div>'
+
+    tbl_html = []
+    for title, headers, rows in tables:
+        th = "".join(f"<th>{_html_escape(h)}</th>" for h in headers)
+        body = []
+        for r in rows:
+            tds = "".join(f"<td>{_html_escape(c)}</td>" for c in r)
+            body.append(f"<tr>{tds}</tr>")
+        tbl_html.append(
+            f'<section class="sec"><h2>{_html_escape(title)}</h2>'
+            f'<table class="data"><thead><tr>{th}</tr></thead>'
+            f'<tbody>{"".join(body)}</tbody></table></section>'
+        )
+
+    chart_html = []
+    for title, labels, values in charts:
+        chart_html.append(_svg_bar_chart(labels, values, title=title))
+
+    blk_html = []
+    for h, b in bloklar:
+        blk_html.append(
+            f'<section class="sec"><h2>{_html_escape(h)}</h2>'
+            f'<div class="blk">{_html_escape(b)}</div></section>'
+        )
+
+    meta_rows = "".join(
+        f"<tr><td>{_html_escape(k)}</td><td>{_html_escape(v)}</td></tr>"
+        for k, v in meta.items() if v is not None
     )
+    fk_box = ""
+    if fk_yorum:
+        fk_box = f'<div class="callout">{_html_escape(fk_yorum)}</div>'
+
+    return f"""<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>{_html_escape(baslik)} — {_html_escape(kod)}</title>
+<style>
+:root {{
+  --navy: #0f2744;
+  --navy2: #1B4F72;
+  --line: #d5dde8;
+  --bg: #f4f6f9;
+  --card: #ffffff;
+  --muted: #5c6b7a;
+  --warn: #fff8e6;
+  --warn-b: #e8c96a;
+}}
+* {{ box-sizing: border-box; }}
+body {{
+  margin: 0; font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  background: var(--bg); color: #1a2332; line-height: 1.45;
+}}
+.page {{ max-width: 920px; margin: 0 auto; padding: 28px 20px 48px; }}
+.header {{
+  background: linear-gradient(135deg, var(--navy), var(--navy2));
+  color: #fff; border-radius: 12px; padding: 22px 24px; margin-bottom: 18px;
+}}
+.header h1 {{ margin: 0 0 6px; font-size: 1.35rem; font-weight: 650; }}
+.header .sub {{ opacity: 0.9; font-size: 0.95rem; }}
+.badge {{
+  display: inline-block; background: rgba(255,255,255,0.15);
+  padding: 3px 10px; border-radius: 999px; font-size: 0.8rem; margin-top: 8px;
+}}
+.warn {{
+  background: var(--warn); border: 1px solid var(--warn-b);
+  border-radius: 8px; padding: 12px 14px; margin: 14px 0; font-size: 0.9rem;
+}}
+.callout {{
+  background: #eef5fb; border-left: 4px solid var(--navy2);
+  padding: 12px 14px; border-radius: 0 8px 8px 0; margin: 12px 0; font-size: 0.92rem;
+}}
+.kpi-row {{
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px; margin: 14px 0 18px;
+}}
+.kpi {{
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  padding: 12px 14px;
+}}
+.kpi-l {{ font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }}
+.kpi-v {{ font-size: 1.15rem; font-weight: 650; margin-top: 4px; color: var(--navy); }}
+.sec {{
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  padding: 16px 18px; margin: 14px 0;
+}}
+.sec h2 {{
+  margin: 0 0 12px; font-size: 1.05rem; color: var(--navy);
+  border-bottom: 1px solid var(--line); padding-bottom: 8px;
+}}
+table.data {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}
+table.data th {{
+  text-align: left; background: #eef2f7; color: var(--navy);
+  padding: 8px 10px; border-bottom: 1px solid var(--line); font-weight: 600;
+}}
+table.data td {{
+  padding: 8px 10px; border-bottom: 1px solid #eef1f5;
+}}
+table.data tr:last-child td {{ border-bottom: none; }}
+.blk {{ white-space: pre-wrap; font-size: 0.92rem; color: #2c3a4a; }}
+.chart-wrap {{ margin: 12px 0 8px; }}
+.chart-title {{ font-size: 0.9rem; font-weight: 600; color: var(--navy); margin-bottom: 6px; }}
+.muted {{ color: var(--muted); font-size: 0.85rem; }}
+.footer {{
+  margin-top: 24px; padding-top: 12px; border-top: 1px solid var(--line);
+  font-size: 0.8rem; color: var(--muted);
+}}
+@media print {{
+  body {{ background: #fff; }}
+  .page {{ padding: 0; }}
+  .header {{ border-radius: 0; }}
+}}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="header">
+    <h1>{_html_escape(baslik)}</h1>
+    <div class="sub"><b>{_html_escape(kod)}</b> · {_html_escape(ad)} · Bilanço dönemi: <b>{_html_escape(donem or "—")}</b></div>
+    <div class="badge">Üretim: {_html_escape(ts)} · M.Durmaz Analiz</div>
+  </div>
+  <div class="warn">
+    <b>Yasal uyarı:</b> Bu rapor bilgilendirme amaçlıdır; yatırım tavsiyesi değildir.
+    Veriler TEFAS, İş Yatırım ve piyasa kaynaklarından derlenmiştir; gecikme / hata olabilir.
+  </div>
+  {fk_box}
+  {kpi_html}
+  <section class="sec">
+    <h2>Rapor özeti</h2>
+    <table class="data"><thead><tr><th>Alan</th><th>Değer</th></tr></thead>
+    <tbody>{meta_rows}</tbody></table>
+  </section>
+  {"".join(tbl_html)}
+  {('<section class="sec"><h2>Grafikler</h2>' + "".join(chart_html) + "</section>") if chart_html else ""}
+  {"".join(blk_html)}
+  <div class="footer">
+    M.Durmaz · TEFAS / BIST rapor paketi · F/K ve çarpanlar piyasa verisine bağlıdır ·
+    Nakit / PD oranı dönem sonu nakit ÷ piyasa değeri
+  </div>
+</div>
+</body>
+</html>"""
 
 
 # ── Bilanço bildirimleri (FON / HİSSE ayrı) ─────────────────────────────────
@@ -1424,7 +2043,15 @@ def isyatirim_mali_tablo(
     yoy = (gunce_y - 1, gunce_d)
     rest = [i for i in order[1:]]
     rest_sorted = sorted(rest, key=lambda i: (0 if periods[i] == yoy else 1, -periods[i][0], -periods[i][1]))
-    order = [best_i] + rest_sorted
+    # YoY aynı çeyrek (ör. 2026/9 → 2025/9) ikinci sıraya
+    yoy_i = None
+    by, bd = periods[best_i]
+    for i, (yy, dd) in enumerate(periods):
+        if i != best_i and yy == by - 1 and dd == bd:
+            yoy_i = i
+            break
+    rest_sorted = [i for i in rest_sorted if i != yoy_i]
+    order = [best_i] + ([yoy_i] if yoy_i is not None else []) + rest_sorted
 
     periods_ord = [periods[i] for i in order]
     col_labels = [f"{y}/{p}" for y, p in periods_ord]
@@ -2470,7 +3097,7 @@ def render_artan_dusen_paneli():
             if fa is not None and hasattr(fa, "empty") and not fa.empty:
                 show = fa.copy()
                 if "degisim" in show.columns:
-                    show["degisim"] = show["degisim"].map(lambda x: f"%{x:.2f}" if pd.notna(x) else "—")
+                    show["degisim"] = show["degisim"].map(lambda x: f"%{tr_num(x, 2)}" if pd.notna(x) else "—")
                 st.dataframe(show, hide_index=True, use_container_width=True)
             else:
                 st.caption("Fon artan listesi yok. «Fon Tarama» çalıştırın veya TEFAS API bağlayın.")
@@ -2478,7 +3105,7 @@ def render_artan_dusen_paneli():
             if fd is not None and hasattr(fd, "empty") and not fd.empty:
                 show = fd.copy()
                 if "degisim" in show.columns:
-                    show["degisim"] = show["degisim"].map(lambda x: f"%{x:.2f}" if pd.notna(x) else "—")
+                    show["degisim"] = show["degisim"].map(lambda x: f"%{tr_num(x, 2)}" if pd.notna(x) else "—")
                 st.dataframe(show, hide_index=True, use_container_width=True)
             else:
                 st.caption("Fon düşen listesi yok.")
@@ -2490,7 +3117,7 @@ def render_artan_dusen_paneli():
             if ha is not None and hasattr(ha, "empty") and not ha.empty:
                 show = ha.copy()
                 if "degisim" in show.columns:
-                    show["degisim"] = show["degisim"].map(lambda x: f"%{x:.2f}" if pd.notna(x) else "—")
+                    show["degisim"] = show["degisim"].map(lambda x: f"%{tr_num(x, 2)}" if pd.notna(x) else "—")
                 st.dataframe(show, hide_index=True, use_container_width=True)
             else:
                 st.caption("Hisse artan listesi yok. yfinance kurulu mu?")
@@ -2498,7 +3125,7 @@ def render_artan_dusen_paneli():
             if hd is not None and hasattr(hd, "empty") and not hd.empty:
                 show = hd.copy()
                 if "degisim" in show.columns:
-                    show["degisim"] = show["degisim"].map(lambda x: f"%{x:.2f}" if pd.notna(x) else "—")
+                    show["degisim"] = show["degisim"].map(lambda x: f"%{tr_num(x, 2)}" if pd.notna(x) else "—")
                 st.dataframe(show, hide_index=True, use_container_width=True)
             else:
                 st.caption("Hisse düşen listesi yok.")
@@ -4372,11 +4999,18 @@ elif sayfa == "⚖️ Karşılaştırma":
                         info = dict(t.info or {})
                     except Exception:
                         info = {}
-                    row["F/K"] = info.get("trailingPE")
-                    row["PD/DD"] = info.get("priceToBook")
                     if info.get("returnOnEquity") is not None:
                         row["ROE"] = float(info["returnOnEquity"]) * 100
                     row["ad"] = (info.get("longName") or info.get("shortName") or kod)[:48]
+                    try:
+                        _ic = deg_from_isyatirim(kod)
+                        if not _ic.get("_error"):
+                            row["F/K"] = _ic.get("F/K")
+                            row["PD/DD"] = _ic.get("PD/DD")
+                            if _ic.get("fiyat") is not None:
+                                row["fiyat"] = _ic["fiyat"]
+                    except Exception:
+                        pass
                 except Exception as e:
                     st.caption(f"{kod} fiyat: {e}")
                 try:
@@ -4419,11 +5053,12 @@ elif sayfa == "⚖️ Karşılaştırma":
 # ═══════════════════════════════════════════════════════════════════════════
 # RAPOR PAKETLERİ
 # ═══════════════════════════════════════════════════════════════════════════
+
 elif sayfa == "📦 Rapor Paketleri":
     st.header("📦 Rapor Paketleri")
     st.caption(
-        "Hisse veya fon için HTML özet paket. "
-        "Bilanço dönemi, kalite skoru, model sinyal. Yatırım tavsiyesi değildir."
+        "Kurumsal HTML rapor: F/K kontrolü, nakit/PD, satış ve kâr tabloları, grafikler. "
+        "Yatırım tavsiyesi değildir."
     )
     rp1, rp2 = st.columns(2)
     with rp1:
@@ -4436,68 +5071,411 @@ elif sayfa == "📦 Rapor Paketleri":
         )
     if st.button("Rapor paketi oluştur", type="primary", key="btn_rp"):
         kod = (rp_kod or "").strip().upper().replace(".IS", "")
-        bloklar = []
-        meta = {"kod": kod, "tur": rp_tur}
-        ad, donem = kod, ""
-        with st.spinner("Paket hazırlanıyor…"):
+        bloklar, tables, charts = [], [], []
+        meta, kpi = {"Kod": kod, "Tür": rp_tur}, {}
+        ad, donem, fk_yorum = kod, "", ""
+        with st.spinner("Kurumsal rapor hazırlanıyor…"):
             if rp_tur == "Hisse":
-                isy = {}
+                isy, info = {}, {}
+                m, deg = {}, {}
                 try:
-                    isy = isyatirim_mali_tablo(kod, force=True)
+                    isy = isyatirim_mali_tablo(kod, force=True) or {}
                 except Exception as e:
                     st.warning(f"İş Yatırım: {e}")
-                donem = (isy or {}).get("gunce_donem") or ""
-                meta["bilanco_donem"] = donem
-                kal = bilanco_kalite_skoru(isy, {})
-                meta["kalite_skor"] = kal.get("skor")
-                m, deg = {}, {}
+                    isy = {}
+                donem = isy.get("gunce_donem") or ""
+                meta["Bilanço dönemi"] = donem or "—"
+                oz = isy.get("ozet") or {}
+                oran = isy.get("oranlar") or {}
+
+                def _oz_val(key):
+                    item = oz.get(key) or {}
+                    return item.get("deger") if isinstance(item, dict) else None
+
+                def _oz_yoy(key):
+                    item = oz.get(key) or {}
+                    return item.get("degisim_%") if isinstance(item, dict) else None
+
+                nakit = _oz_val("nakit")
+                hasilat = _oz_val("hasilat")
+                brut = _oz_val("brut_kar")
+                faaliyet = _oz_val("esas_faaliyet_kari")
+                net = _oz_val("net_donem_kari")
+                ozk = _oz_val("ozkaynaklar")
+
+                # Çarpanlar: YALNIZCA İş Yatırım (Yahoo F/K kullanılmaz)
+                try:
+                    deg = deg_from_isyatirim(kod, force=True)
+                    if deg.get("fiyat") is not None:
+                        m["fiyat"] = deg["fiyat"]
+                    mcap = deg.get("piyasa_değeri")
+                    meta["Çarpan kaynağı"] = "İş Yatırım şirket kartı"
+                except Exception as e:
+                    st.caption(f"İş Yatırım çarpan: {e}")
+                    mcap = None
+                # Fiyat / 1Y getiri için yfinance yalnızca OHLCV (çarpan değil)
                 try:
                     import yfinance as yf
                     t = yf.Ticker(f"{kod}.IS")
                     hist = t.history(period="1y", auto_adjust=True)
                     if hist is not None and not hist.empty:
                         px = hist["Close"].dropna()
-                        m["fiyat"] = float(px.iloc[-1])
+                        if m.get("fiyat") is None and len(px):
+                            m["fiyat"] = float(px.iloc[-1])
                         if len(px) > 2:
                             m["getiri_1y"] = float((px.iloc[-1] / px.iloc[0] - 1) * 100)
                     try:
                         info = dict(t.info or {})
+                        ad = info.get("longName") or info.get("shortName") or ad
                     except Exception:
-                        info = {}
-                    ad = info.get("longName") or kod
-                    deg = {"F/K": info.get("trailingPE"), "PD/DD": info.get("priceToBook")}
+                        pass
+                except Exception as e:
+                    st.caption(f"Fiyat serisi: {e}")
+                if oran.get("ROE_%") is not None:
+                    deg["ROE"] = oran["ROE_%"]
+
+                fk = deg.get("F/K")
+                pddd = deg.get("PD/DD")
+                # F/K kontrol
+                try:
+                    fk_f = float(fk) if fk is not None else None
+                except (TypeError, ValueError):
+                    fk_f = None
+                if fk_f is None:
+                    fk_yorum = (
+                        "F/K: veri yok veya negatif kâr nedeniyle tanımsız. "
+                        "Çarpan yorumu için net kâr ve sektör ortalamasını kontrol edin."
+                    )
+                elif fk_f < 0:
+                    fk_yorum = f"F/K ({fk_f:.1f}) negatif — zarar dönemi veya muhasebe etkisi; klasik F/K yorumu geçersiz."
+                elif fk_f < 8:
+                    fk_yorum = f"F/K = {fk_f:.1f} — düşük çarpan bandı (sektör ile kıyaslayın; ucuz görünüm)."
+                elif fk_f <= 15:
+                    fk_yorum = f"F/K = {fk_f:.1f} — orta / makul çarpan bandı."
+                elif fk_f <= 25:
+                    fk_yorum = f"F/K = {fk_f:.1f} — görece yüksek; büyüme beklentisi fiyatlanmış olabilir."
+                else:
+                    fk_yorum = f"F/K = {fk_f:.1f} — yüksek çarpan; değerleme riski artmış olabilir."
+
+                nakit_pd = None
+                if nakit is not None and mcap:
+                    try:
+                        nakit_pd = float(nakit) / float(mcap) * 100.0
+                    except Exception:
+                        nakit_pd = None
+
+                kpi = {
+                    "Fiyat": _fmt_tl(m.get("fiyat")) if m.get("fiyat") is not None else "—",
+                    "F/K": f"{fk_f:.1f}" if fk_f is not None else "—",
+                    "PD/DD": tr_num(pddd, 2) if pddd is not None else "—",
+                    "Piyasa değeri": _fmt_tl(mcap) if mcap else "—",
+                    "Dönem sonu nakit": _fmt_tl(nakit) if nakit is not None else "—",
+                    "Nakit / PD": f"%{nakit_pd:.1f}" if nakit_pd is not None else "—",
+                }
+                meta.update({
+                    "Şirket": ad,
+                    "F/K": tr_num(fk_f, 2) if fk_f is not None else "yok",
+                    "PD/DD": tr_num(pddd, 2) if pddd is not None else "—",
+                    "ROE %": tr_num(deg.get("ROE"), 1) if deg.get("ROE") is not None else "—",
+                    "1Y getiri %": f"{m['getiri_1y']:.1f}" if m.get("getiri_1y") is not None else "—",
+                    "Nakit/PD %": tr_num(nakit_pd, 2) if nakit_pd is not None else "—",
+                })
+
+
+                # ── Çok dönemli satış / kârlılık (İş Yatırım kolonları) ──
+                col_labels = list(isy.get("col_labels") or [])
+                gelir_df = isy.get("gelir_df")
+                bilanco_df = isy.get("bilanco_df")
+
+                def _series_from_df(df, codes, prefer_desc=None):
+                    """itemCode listesinden ilk eşleşen satırın dönem değerleri."""
+                    if df is None or getattr(df, "empty", True) or not col_labels:
+                        return None, None
+                    work = df.copy()
+                    if "kod" not in work.columns:
+                        return None, None
+                    for code in codes:
+                        hit = work[work["kod"].astype(str) == code]
+                        if hit.empty:
+                            continue
+                        row0 = hit.iloc[0]
+                        vals = []
+                        for lab in col_labels:
+                            v = row0.get(lab)
+                            try:
+                                vals.append(float(v) if v is not None and v == v else None)
+                            except (TypeError, ValueError):
+                                vals.append(None)
+                        return row0.get("kalem") or code, vals
+                    return None, None
+
+                def _pct(a, b):
+                    try:
+                        if a is None or b is None or b == 0:
+                            return None
+                        return round((float(a) / float(b) - 1.0) * 100.0, 1)
+                    except Exception:
+                        return None
+
+                def _marj(kar, sat):
+                    try:
+                        if kar is None or sat is None or sat == 0:
+                            return None
+                        return round(float(kar) / float(sat) * 100.0, 1)
+                    except Exception:
+                        return None
+
+                sat_lab, sat_vals = _series_from_df(gelir_df, ("3C", "3A", "3AA"))
+                brut_lab, brut_vals = _series_from_df(gelir_df, ("3D", "3CAB"))
+                faal_lab, faal_vals = _series_from_df(gelir_df, ("3DF", "3H", "3E"))
+                net_lab, net_vals = _series_from_df(gelir_df, ("3L", "3J", "3I"))
+                nakit_lab, nakit_vals = _series_from_df(bilanco_df, ("1AA", "1AAA"))
+                ozk_lab, ozk_vals = _series_from_df(bilanco_df, ("2N", "2O"))
+
+                # Tek dönem yedek (ozet)
+                if not sat_vals or all(v is None for v in (sat_vals or [])):
+                    sat_vals = [_oz_val("hasilat")] + [None] * max(0, len(col_labels) - 1)
+                    col_labels = col_labels or [donem or "Güncel"]
+                if not net_vals or all(v is None for v in (net_vals or [])):
+                    net_vals = [_oz_val("net_donem_kari")] + [None] * max(0, len(col_labels) - 1)
+                if not brut_vals:
+                    brut_vals = [_oz_val("brut_kar")] + [None] * max(0, len(col_labels) - 1)
+                if not faal_vals:
+                    faal_vals = [_oz_val("esas_faaliyet_kari")] + [None] * max(0, len(col_labels) - 1)
+
+                # Çok dönem satış + kâr tablosu
+                multi_headers = ["Kalem"] + list(col_labels)
+                multi_rows = []
+                for label, vals in [
+                    ("Satışlar (hasılat)", sat_vals),
+                    ("Brüt kâr", brut_vals),
+                    ("Esas faaliyet kârı", faal_vals),
+                    ("Net dönem kârı", net_vals),
+                    ("Nakit", nakit_vals),
+                    ("Özkaynaklar", ozk_vals),
+                ]:
+                    if not vals:
+                        continue
+                    multi_rows.append(
+                        [label] + [_fmt_tl(v) if v is not None else "—" for v in vals]
+                    )
+                if multi_rows:
+                    tables.append((
+                        f"Çok dönemli karşılaştırma (İş Yatırım) — güncel: {donem or col_labels[0] if col_labels else '—'}",
+                        multi_headers,
+                        multi_rows,
+                    ))
+
+                # Dönemsel kârlılık marjları
+                marj_rows = []
+                for i, lab in enumerate(col_labels):
+                    s = sat_vals[i] if sat_vals and i < len(sat_vals) else None
+                    b = brut_vals[i] if brut_vals and i < len(brut_vals) else None
+                    f = faal_vals[i] if faal_vals and i < len(faal_vals) else None
+                    n = net_vals[i] if net_vals and i < len(net_vals) else None
+                    marj_rows.append([
+                        lab,
+                        f"%{_marj(b, s)}" if _marj(b, s) is not None else "—",
+                        f"%{_marj(f, s)}" if _marj(f, s) is not None else "—",
+                        f"%{_marj(n, s)}" if _marj(n, s) is not None else "—",
+                        _fmt_tl(s) if s is not None else "—",
+                        _fmt_tl(n) if n is not None else "—",
+                    ])
+                if marj_rows:
+                    tables.append((
+                        "Dönemsel kârlılık (marjlar)",
+                        ["Dönem", "Brüt marj %", "Faaliyet marj %", "Net marj %", "Satış", "Net kâr"],
+                        marj_rows,
+                    ))
+
+                # Satış büyümesi vs enflasyon
+                tufe = None
+                try:
+                    tufe = float((st.session_state.cfg or {}).get("tufe_yillik") or 0) or None
                 except Exception:
-                    pass
+                    tufe = None
+                if tufe is None:
+                    tufe = 40.0  # yedek gösterim; meta'da belirtilir
+                    tufe_src = "varsayılan (Ayarlar'da TÜFE yok)"
+                else:
+                    tufe_src = "Ayarlar · tufe_yillik"
+
+                buyume_rows = []
+                # Ardışık dönemler ve YoY aynı çeyrek (col0 vs col1 genelde YoY)
+                if sat_vals and len(sat_vals) >= 2:
+                    for i in range(len(sat_vals) - 1):
+                        a, b = sat_vals[i], sat_vals[i + 1]
+                        g = _pct(a, b)
+                        if g is None:
+                            continue
+                        reel = round(g - float(tufe), 1) if tufe is not None else None
+                        buyume_rows.append([
+                            f"{col_labels[i]} vs {col_labels[i+1]}",
+                            f"%{g:.1f}",
+                            f"%{tufe:.1f}" if tufe is not None else "—",
+                            f"%{reel:.1f}" if reel is not None else "—",
+                            "Reel büyüme (+)" if reel is not None and reel > 0 else (
+                                "Enflasyon altı" if reel is not None else "—"
+                            ),
+                        ])
+                # Net kâr büyümesi de
+                net_buyume = []
+                if net_vals and len(net_vals) >= 2:
+                    for i in range(min(3, len(net_vals) - 1)):
+                        g = _pct(net_vals[i], net_vals[i + 1])
+                        if g is None:
+                            continue
+                        net_buyume.append([
+                            f"Net {col_labels[i]} vs {col_labels[i+1]}",
+                            f"%{g:.1f}",
+                        ])
+                if buyume_rows:
+                    tables.append((
+                        f"Satış büyümesi vs enflasyon (TÜFE %{tufe:.0f} · {tufe_src})",
+                        ["Karşılaştırma", "Satış büyüme %", "TÜFE %", "Fark (satış−TÜFE)", "Yorum"],
+                        buyume_rows,
+                    ))
+                    meta["TÜFE %"] = tufe
+                    meta["Satış−TÜFE (ilk satır)"] = buyume_rows[0][3] if buyume_rows else "—"
+
+                # Tek dönem özet (geriye uyum)
+                gel_rows = []
+                for label, key in [
+                    ("Satışlar (hasılat)", "hasilat"),
+                    ("Brüt kâr", "brut_kar"),
+                    ("Esas faaliyet kârı", "esas_faaliyet_kari"),
+                    ("Net dönem kârı", "net_donem_kari"),
+                ]:
+                    v = _oz_val(key)
+                    y = _oz_yoy(key)
+                    gel_rows.append([
+                        label,
+                        _fmt_tl(v) if v is not None else "—",
+                        f"%{tr_num(y, 1)}" if y is not None else "—",
+                    ])
+                tables.append((
+                    f"Gelir özeti (güncel dönem {donem or '—'})",
+                    ["Kalem", "Tutar (TL)", "YoY %"],
+                    gel_rows,
+                ))
+
+                bil_rows = []
+                for label, key in [
+                    ("Nakit ve benzerleri", "nakit"),
+                    ("Dönen varlıklar", "donen_varliklar"),
+                    ("Toplam varlıklar", "toplam_varliklar"),
+                    ("Kısa vadeli yükümlülük", "kisa_vadeli_yukumluluk"),
+                    ("Özkaynaklar", "ozkaynaklar"),
+                ]:
+                    v = _oz_val(key)
+                    y = _oz_yoy(key)
+                    bil_rows.append([
+                        label,
+                        _fmt_tl(v) if v is not None else "—",
+                        f"%{tr_num(y, 1)}" if y is not None else "—",
+                    ])
+                if nakit_pd is not None:
+                    bil_rows.append(["Nakit / Piyasa değeri", f"%{nakit_pd:.2f}", "—"])
+                tables.append((
+                    f"Bilanço özeti — {donem or 'güncel'}",
+                    ["Kalem", "Tutar / oran", "YoY %"],
+                    bil_rows,
+                ))
+
+                tables.append((
+                    "Değerleme çarpanları (İş Yatırım — F/K kontrolü)",
+                    ["Çarpan", "Değer", "Not"],
+                    [
+                        ["F/K", tr_num(fk_f, 2) if fk_f is not None else "—", (fk_yorum or "")[:90]],
+                        ["PD/DD", tr_num(pddd, 2) if pddd is not None else "—", "İş Yatırım"],
+                        ["FD/FAVÖK", tr_num(deg.get("FD/FAVÖK"), 2) if deg.get("FD/FAVÖK") is not None else "—", "İş Yatırım"],
+                        ["ROE %", tr_num(deg.get("ROE"), 1) if deg.get("ROE") is not None else "—", "Bilanço / oran"],
+                        ["Nakit/PD %", tr_num(nakit_pd, 2) if nakit_pd is not None else "—", "Dönem sonu nakit ÷ PD"],
+                    ],
+                ))
+
+                # Grafik: çok dönem satış
+                if sat_vals and col_labels and any(v is not None for v in sat_vals):
+                    labs = [str(x) for x in col_labels]
+                    charts.append((
+                        "Satışlar — dönemler",
+                        labs,
+                        [v if v is not None else 0 for v in sat_vals],
+                    ))
+                if net_vals and col_labels and any(v is not None for v in net_vals):
+                    charts.append((
+                        "Net kâr — dönemler",
+                        [str(x) for x in col_labels],
+                        [v if v is not None else 0 for v in net_vals],
+                    ))
+                # Güncel dönem kalem kırılımı
+                chart_labels, chart_vals = [], []
+                for lab, key in [
+                    ("Satış", "hasilat"),
+                    ("Brüt", "brut_kar"),
+                    ("Faaliyet", "esas_faaliyet_kari"),
+                    ("Net", "net_donem_kari"),
+                ]:
+                    v = _oz_val(key)
+                    if v is not None:
+                        chart_labels.append(lab)
+                        chart_vals.append(v)
+                if chart_labels:
+                    charts.append((f"Satış ve kârlar ({donem})", chart_labels, chart_vals))
+                # Marj grafiği (güncel)
+                if marj_rows:
+                    # her dönem net marj
+                    m_labs, m_vals = [], []
+                    for r in marj_rows:
+                        try:
+                            mv = float(str(r[3]).replace("%", "").replace("—", ""))
+                            m_labs.append(str(r[0]))
+                            m_vals.append(mv)
+                        except Exception:
+                            pass
+                    if m_labs:
+                        charts.append(("Net marj % — dönemler", m_labs, m_vals))
+                # Satış büyüme vs TÜFE
+                if buyume_rows:
+                    blabs, bsat, btufe = [], [], []
+                    for r in buyume_rows[:4]:
+                        try:
+                            blabs.append(str(r[0])[:18])
+                            bsat.append(float(str(r[1]).replace("%", "")))
+                            btufe.append(float(str(r[2]).replace("%", "")))
+                        except Exception:
+                            pass
+                    if blabs:
+                        charts.append(("Satış büyüme % (dönem karşılaştırmaları)", blabs, bsat))
+                        charts.append((f"TÜFE referans %{tufe:.0f}", blabs, btufe))
+
+                kal = bilanco_kalite_skoru(isy, deg)
                 tu = tarihsel_ucuzluk_analizi(kod, deg=deg)
                 sig = model_sinyal_skoru(m=m, deg=deg, kalite=kal, tu=tu)
-                meta["model_sinyal"] = sig.get("skor")
-                oz_lines = []
-                for k, item in ((isy or {}).get("ozet") or {}).items():
-                    if isinstance(item, dict) and item.get("deger") is not None:
-                        line = f"{item.get('kalem') or k}: {_fmt_tl(item.get('deger'))}"
-                        if item.get("degisim_%") is not None:
-                            line += f" (YoY %{item.get('degisim_%')})"
-                        oz_lines.append(line)
-                nl = chr(10)
-                bloklar.append(("Bilanço özeti (" + str(donem) + ")", nl.join(oz_lines) or "—"))
+                bir = birlesik_profil_skoru(kalite=kal, sinyal=sig, tu=tu)
+                meta["Kalite skoru"] = kal.get("skor")
+                meta["Model sinyal"] = sig.get("skor")
+                meta["Ucuzluk skoru"] = tu.get("skor")
+                meta["Birleşik ortalama"] = bir.get("ortalama")
+
                 bloklar.append((
-                    "Bilanço kalite skoru",
-                    (
-                        f"Skor: {kal.get('skor')}/100 ({kal.get('seviye')})" + nl
-                        + str(kal.get("yorum") or "") + nl
-                        + "Artılar: " + ", ".join(kal.get("artilar") or ["—"]) + nl
-                        + "Eksiler: " + ", ".join(kal.get("eksiler") or ["—"])
-                    ),
+                    "F/K kontrol notu",
+                    fk_yorum or "F/K verisi yok.",
                 ))
                 bloklar.append((
-                    "Model sinyal (kural tabanlı)",
-                    (
-                        f"Skor: {sig.get('skor')} · {sig.get('etiket')}" + nl
-                        + f"Bileşenler: {sig.get('bilesenler')}" + nl + nl
-                        + str(sig.get("disclaimer") or "")
-                    ),
+                    "Bilanço kalite",
+                    f"Skor: {kal.get('skor')}/100 ({kal.get('seviye')})\n{kal.get('yorum')}\n"
+                    f"Artılar: {', '.join(kal.get('artilar') or ['—'])}\n"
+                    f"Eksiler: {', '.join(kal.get('eksiler') or ['—'])}",
                 ))
-                bloklar.append(("Tarihsel ucuzluk", nl.join(tu.get("yorum") or ["—"])))
+                bloklar.append((
+                    "Model sinyal (kural tabanlı — tavsiye değildir)",
+                    f"Skor: {sig.get('skor')} · {sig.get('etiket')}\n{sig.get('disclaimer')}",
+                ))
+                bloklar.append((
+                    "Birleşik profil (eşit ağırlık)",
+                    bir.get("not") or "",
+                ))
             else:
                 try:
                     analiz = get_analiz()
@@ -4505,55 +5483,59 @@ elif sayfa == "📦 Rapor Paketleri":
                     m, o, p = d["metrikler"], d["ozet"], d["profil"]
                     ad = (o.get("fonUnvan") or p.get("fonUnvan") or kod)
                     meta.update({
-                        "getiri_1y": m.get("getiri_1y"),
-                        "sharpe": m.get("sharpe"),
-                        "max_drawdown": m.get("max_drawdown"),
-                        "risk": p.get("riskDegeri"),
+                        "Fon ad": ad,
+                        "1Y %": m.get("getiri_1y"),
+                        "Sharpe": m.get("sharpe"),
+                        "MaxDD": m.get("max_drawdown"),
+                        "Risk": p.get("riskDegeri"),
                     })
-                    met_lines = [f"{k}: {v}" for k, v in m.items() if v is not None and not str(k).startswith("_")]
-                    nl = chr(10)
-                    bloklar.append(("Fon metrikleri", nl.join(met_lines)))
-                    try:
-                        txt = core.turkce_degerlendirme(
-                            sharpe=m.get("sharpe"), max_dd=m.get("max_drawdown"),
-                            vol=m.get("volatilite"), getiri_1y=m.get("getiri_1y"), plain=True,
-                        )
-                        bloklar.append(("Değerlendirme", str(txt)))
-                    except Exception:
-                        pass
+                    kpi = {
+                        "1Y getiri": f"%{m.get('getiri_1y')}" if m.get("getiri_1y") is not None else "—",
+                        "Sharpe": f"{m.get('sharpe')}" if m.get("sharpe") is not None else "—",
+                        "MaxDD": f"%{m.get('max_drawdown')}" if m.get("max_drawdown") is not None else "—",
+                        "Volatilite": f"%{m.get('volatilite')}" if m.get("volatilite") is not None else "—",
+                    }
+                    tables.append((
+                        "Fon performans özeti",
+                        ["Metrik", "Değer"],
+                        [[str(k), str(v)] for k, v in m.items() if v is not None and not str(k).startswith("_")][:20],
+                    ))
                     sig = model_sinyal_skoru(m=m)
-                    meta["model_sinyal"] = sig.get("skor")
+                    meta["Model sinyal"] = sig.get("skor")
                     bloklar.append((
-                        "Model sinyal (kural tabanlı)",
-                        f"Skor: {sig.get('skor')} · {sig.get('etiket')}" + nl + str(sig.get("disclaimer") or ""),
+                        "Model sinyal",
+                        f"Skor: {sig.get('skor')} · {sig.get('etiket')}\n{sig.get('disclaimer')}",
                     ))
                 except Exception as e:
                     st.error(f"Fon raporu: {e}")
                     bloklar.append(("Hata", str(e)))
+
         html = rapor_paketi_html(
-            baslik="M.Durmaz Rapor Paketi",
+            baslik="M.Durmaz Kurumsal Analiz Raporu",
             kod=kod, ad=ad or "", donem=donem or "—",
             bloklar=bloklar, meta=meta,
+            tables=tables, charts=charts, kpi=kpi,
+            fk_yorum=fk_yorum,
         )
         st.session_state["_rapor_html"] = html
         st.session_state["_rapor_meta"] = meta
-        st.success("Paket hazır.")
+        st.success("Kurumsal rapor hazır.")
 
     if st.session_state.get("_rapor_html"):
         meta0 = st.session_state.get("_rapor_meta") or {}
         st.download_button(
-            "HTML indir",
+            "HTML rapor indir",
             data=st.session_state["_rapor_html"].encode("utf-8"),
-            file_name=f"rapor_{meta0.get('kod', 'x')}_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
+            file_name=f"rapor_{meta0.get('Kod', meta0.get('kod', 'x'))}_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
             mime="text/html",
             key="dl_rp_html",
         )
-        with st.expander("Önizleme"):
+        with st.expander("Önizleme", expanded=True):
             try:
                 import streamlit.components.v1 as components
-                components.html(st.session_state["_rapor_html"], height=480, scrolling=True)
+                components.html(st.session_state["_rapor_html"], height=720, scrolling=True)
             except Exception:
-                st.code(st.session_state["_rapor_html"][:2000])
+                st.code(st.session_state["_rapor_html"][:3000])
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PORTFÖY
@@ -4935,12 +5917,1104 @@ elif sayfa == "📁 Portföy":
 # ═══════════════════════════════════════════════════════════════════════════
 # OPTİMİZASYON
 # ═══════════════════════════════════════════════════════════════════════════
+
+
+
 elif sayfa == "💼 Portföyüm":
-    try:
-        tefas_portfoyum.render(core=core, get_analiz=get_analiz)
-    except Exception as e:
-        st.error(f"Portföyüm yüklenemedi: {e}")
-        st.caption("tefas_portfoyum modülünü kontrol edin.")
+    # Fonaly tarzı takip + Excel yükleme (fon.xlsx Özet/Lotlar) + düzenleme
+    st.markdown(
+        """
+        <style>
+        .fy-card {
+            background: linear-gradient(145deg,#121a24,#0d141c);
+            border: 1px solid #1e2a3a; border-radius: 14px;
+            padding: 14px 16px; margin-bottom: 10px;
+        }
+        .fy-card .lbl {
+            font-size: 0.72rem; letter-spacing: .06em; text-transform: uppercase;
+            color: #7a8fa6; margin-bottom: 4px;
+        }
+        .fy-card .val { font-size: 1.45rem; font-weight: 700; color: #e8eef6; }
+        .fy-card .sub { font-size: 0.85rem; color: #8fa3b8; margin-top: 2px; }
+        .fy-pos { color: #3ddc97 !important; }
+        .fy-neg { color: #ff6b6b !important; }
+        .fy-hero {
+            background: linear-gradient(120deg,#0f2744,#163a2a);
+            border: 1px solid #1e3d32; border-radius: 16px;
+            padding: 16px 18px; margin-bottom: 12px;
+        }
+        .fy-hero h2 { margin: 0 0 4px; color: #e8eef6; font-size: 1.2rem; }
+        .fy-hero p { margin: 0; color: #9bb0c4; font-size: 0.9rem; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if "sanal_portfoy" not in st.session_state:
+        st.session_state.sanal_portfoy = {
+            "ad": "Portföyüm",
+            "nakit": 0.0,
+            "pozisyonlar": {},
+            "lotlar": [],
+            "islemler": [],
+            "kaynak": None,
+        }
+    sp = st.session_state.sanal_portfoy
+
+    st.markdown(
+        f'<div class="fy-hero"><h2>💼 {sp.get("ad") or "Portföyüm"}</h2>'
+        f'<p>Excel (Özet / Lotlar) yükle · düzenle · canlı fiyat ile K/Z. Al/sat emri yok. Yatırım tavsiyesi değildir.</p></div>',
+        unsafe_allow_html=True,
+    )
+
+    def _sp_fiyatlar(kodlar):
+        out = {}
+        try:
+            analiz = get_analiz()
+        except Exception:
+            analiz = None
+        for kod in kodlar:
+            px = None
+            if analiz is not None:
+                try:
+                    fd = analiz.api.fiyat(kod, periyod=1)
+                    if fd is not None and not getattr(fd, "empty", True) and "fiyat" in fd.columns:
+                        px = float(pd.to_numeric(fd["fiyat"], errors="coerce").dropna().iloc[-1])
+                except Exception:
+                    pass
+            if px is None:
+                try:
+                    import yfinance as yf
+                    h = yf.Ticker(f"{kod}.IS").history(period="5d")
+                    if h is not None and not h.empty:
+                        px = float(h["Close"].iloc[-1])
+                except Exception:
+                    pass
+            out[kod] = px
+        return out
+
+    def _norm_col(c):
+        s = str(c or "").strip().lower()
+        for a, b in (("ı", "i"), ("ğ", "g"), ("ü", "u"), ("ş", "s"), ("ö", "o"), ("ç", "c")):
+            s = s.replace(a, b)
+        return s
+
+    def _excel_to_portfoy(file_bytes: bytes) -> dict:
+        """fon.xlsx: Özet + Lotlar sayfaları → pozisyonlar + lotlar."""
+        from io import BytesIO
+        xls = pd.ExcelFile(BytesIO(file_bytes))
+        sheets = { _norm_col(n): n for n in xls.sheet_names }
+        ozet_name = sheets.get("ozet") or sheets.get("özet") or list(xls.sheet_names)[0]
+        ozet = pd.read_excel(xls, sheet_name=ozet_name)
+        ozet.columns = [str(c).strip() for c in ozet.columns]
+        colmap = {_norm_col(c): c for c in ozet.columns}
+
+        def col(*names):
+            for n in names:
+                if _norm_col(n) in colmap:
+                    return colmap[_norm_col(n)]
+            return None
+
+        c_kod = col("Fon kodu", "kod", "fon")
+        c_ad = col("Fon adı", "ad", "unvan")
+        c_adet = col("Adet", "adet", "pay")
+        c_maliyet = col("Ortalama maliyet", "ortalama maliyet", "maliyet", "alis")
+        c_tm = col("Toplam maliyet (TL)", "toplam maliyet")
+        c_td = col("Toplam değer (TL)", "toplam deger", "toplam değer")
+        if not c_kod:
+            raise ValueError("Excel'de 'Fon kodu' kolonu bulunamadı (Özet).")
+
+        poz = {}
+        for _, r in ozet.iterrows():
+            kod = str(r.get(c_kod) or "").strip().upper()
+            if not kod or kod in ("NAN", "NONE"):
+                continue
+            adet = float(pd.to_numeric(r.get(c_adet), errors="coerce") or 0)
+            if adet <= 0:
+                continue
+            mal = float(pd.to_numeric(r.get(c_maliyet), errors="coerce") or 0)
+            if mal <= 0 and c_tm:
+                tm = float(pd.to_numeric(r.get(c_tm), errors="coerce") or 0)
+                if adet > 0 and tm > 0:
+                    mal = tm / adet
+            poz[kod] = {
+                "adet": adet,
+                "maliyet": mal,
+                "ad": str(r.get(c_ad) or kod)[:80],
+                "excel_deger": float(pd.to_numeric(r.get(c_td), errors="coerce") or 0) if c_td else None,
+                "excel_maliyet_toplam": float(pd.to_numeric(r.get(c_tm), errors="coerce") or 0) if c_tm else None,
+            }
+
+        lotlar = []
+        lot_name = sheets.get("lotlar") or sheets.get("lot")
+        if lot_name:
+            lot_df = pd.read_excel(xls, sheet_name=lot_name)
+            lot_df.columns = [str(c).strip() for c in lot_df.columns]
+            lc = {_norm_col(c): c for c in lot_df.columns}
+            def lcol(*names):
+                for n in names:
+                    if _norm_col(n) in lc:
+                        return lc[_norm_col(n)]
+                return None
+            lk = lcol("Fon kodu", "kod")
+            la = lcol("Adet")
+            lf = lcol("Alış fiyatı", "alis fiyati", "fiyat")
+            lt = lcol("Gerçekleşme tarihi", "tarih")
+            ln = lcol("Lot #", "lot")
+            for _, r in lot_df.iterrows():
+                kod = str(r.get(lk) or "").strip().upper() if lk else ""
+                if not kod:
+                    continue
+                lotlar.append({
+                    "kod": kod,
+                    "lot": r.get(ln) if ln else None,
+                    "tarih": str(r.get(lt) or "")[:16] if lt else "",
+                    "adet": float(pd.to_numeric(r.get(la), errors="coerce") or 0) if la else 0,
+                    "alis": float(pd.to_numeric(r.get(lf), errors="coerce") or 0) if lf else 0,
+                })
+        return {"pozisyonlar": poz, "lotlar": lotlar, "ozet_rows": len(poz)}
+
+    # ── Excel yükle ──
+    with st.expander("📥 Excel’den yükle (Özet / Lotlar)", expanded=not bool(sp.get("pozisyonlar"))):
+        st.caption(
+            "Beklenen format: **Özet** sayfası (Fon kodu, Adet, Ortalama maliyet, Toplam maliyet/değer…) "
+            "ve isteğe bağlı **Lotlar**. Örnek: fon.xlsx"
+        )
+        up = st.file_uploader("fon.xlsx / portföy Excel", type=["xlsx", "xls"], key="fy_excel_up")
+        if up is not None and st.button("Excel’i portföye aktar", type="primary", key="fy_excel_btn"):
+            try:
+                data = _excel_to_portfoy(up.getvalue())
+                sp["pozisyonlar"] = data["pozisyonlar"]
+                sp["lotlar"] = data.get("lotlar") or []
+                sp["kaynak"] = up.name
+                sp["nakit"] = 0.0
+                st.session_state.sanal_portfoy = sp
+                # sepete de yansıt
+                sepet = [{"kod": k, "ad": v.get("ad") or k, "kaynak": "excel"} for k, v in data["pozisyonlar"].items()]
+                st.session_state.portfoy_sepet = sepet
+                st.session_state["_fy_analiz_run"] = True
+                st.session_state["_fy_excel_just_loaded"] = True
+                warns = []
+                for k, v in data["pozisyonlar"].items():
+                    if float(v.get("maliyet") or 0) <= 0:
+                        warns.append(f"{k}: maliyet eksik")
+                msg = f"**{data['ozet_rows']} fon** yüklendi"
+                if sp.get("lotlar"):
+                    msg += f" · **{len(sp['lotlar'])} lot**"
+                msg += " · analiz paneli açılacak"
+                st.success(msg)
+                if warns:
+                    st.warning("Excel uyarıları: " + "; ".join(warns[:10]))
+                st.rerun()
+            except Exception as e:
+                st.error(f"Excel okunamadı: {e}")
+
+    # ── Düzenleme ──
+    with st.expander("✏️ Portföyü düzenle", expanded=False):
+        poz0 = dict(sp.get("pozisyonlar") or {})
+        if not poz0:
+            st.info("Önce Excel yükleyin veya kod listesi ekleyin.")
+        else:
+            edit_rows = []
+            for kod, p in poz0.items():
+                edit_rows.append({
+                    "kod": kod,
+                    "ad": p.get("ad") or kod,
+                    "adet": float(p.get("adet") or 0),
+                    "maliyet": float(p.get("maliyet") or 0),
+                })
+            edf = pd.DataFrame(edit_rows)
+            edited = st.data_editor(
+                edf,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="fy_editor",
+                column_config={
+                    "kod": st.column_config.TextColumn("Fon kodu", required=True),
+                    "ad": st.column_config.TextColumn("Ad"),
+                    "adet": st.column_config.NumberColumn("Adet", min_value=0.0, format="%.4f"),
+                    "maliyet": st.column_config.NumberColumn("Ort. maliyet", min_value=0.0, format="%.6f"),
+                },
+            )
+            if st.button("Düzenlemeyi kaydet", type="primary", key="fy_edit_save"):
+                poz2 = {}
+                for _, r in edited.iterrows():
+                    kod = str(r.get("kod") or "").strip().upper()
+                    if not kod:
+                        continue
+                    adet = float(r.get("adet") or 0)
+                    if adet <= 0:
+                        continue
+                    poz2[kod] = {
+                        "adet": adet,
+                        "maliyet": float(r.get("maliyet") or 0),
+                        "ad": str(r.get("ad") or kod)[:80],
+                    }
+                sp["pozisyonlar"] = poz2
+                st.session_state.sanal_portfoy = sp
+                st.session_state.portfoy_sepet = [
+                    {"kod": k, "ad": v.get("ad") or k, "kaynak": "manuel"} for k, v in poz2.items()
+                ]
+                st.success(f"{len(poz2)} pozisyon kaydedildi.")
+                st.rerun()
+
+        st.markdown("**Kod listesi ile ekle / birleştir**")
+        kod_text = st.text_input("Kodlar (virgülle)", placeholder="GPG, NKP, TI1", key="fy_kod_extra")
+        if st.button("Kodları ekle (eşit ağırlık, mevcut bozulmaz)", key="fy_kod_add") and kod_text.strip():
+            import re as _re
+            kodlar = [x.strip().upper() for x in _re.split(r"[,;\s]+", kod_text) if x.strip()]
+            pxm = _sp_fiyatlar(kodlar)
+            poz2 = dict(sp.get("pozisyonlar") or {})
+            for k in kodlar:
+                if k in poz2:
+                    continue
+                px = pxm.get(k) or 1.0
+                poz2[k] = {"adet": 1000.0, "maliyet": px, "ad": k}
+            sp["pozisyonlar"] = poz2
+            st.session_state.sanal_portfoy = sp
+            st.rerun()
+
+        if st.button("Portföyü temizle", key="fy_clear"):
+            st.session_state.sanal_portfoy = {
+                "ad": "Portföyüm", "nakit": 0.0, "pozisyonlar": {}, "lotlar": [], "islemler": [], "kaynak": None,
+            }
+            st.rerun()
+
+    poz = dict(sp.get("pozisyonlar") or {})
+    kodlar = list(poz.keys())
+    fiyatlar = _sp_fiyatlar(kodlar) if kodlar else {}
+
+    maliyet_toplam = 0.0
+    deger_toplam = 0.0
+    for kod, p in poz.items():
+        adet = float(p.get("adet") or 0)
+        maliyet = float(p.get("maliyet") or 0)
+        maliyet_toplam += adet * maliyet
+        px = fiyatlar.get(kod)
+        if px is None and p.get("excel_deger") and adet:
+            # canlı fiyat yoksa excel değerinden birim
+            try:
+                px = float(p["excel_deger"]) / adet
+            except Exception:
+                px = maliyet
+        deger_toplam += adet * (px if px is not None else maliyet)
+    portfoy_deger = deger_toplam
+    acik_kz = deger_toplam - maliyet_toplam
+    acik_kz_pct = (acik_kz / maliyet_toplam * 100.0) if maliyet_toplam > 0 else 0.0
+
+    left, right = st.columns([1.05, 2.45])
+    with left:
+        kz_cls = "fy-pos" if acik_kz >= 0 else "fy-neg"
+        st.markdown(
+            f'<div class="fy-card"><div class="lbl">Portföy değeri</div>'
+            f'<div class="val">₺{tr_num(portfoy_deger, 2)}</div>'
+            f'<div class="sub">{sp.get("kaynak") or "manuel"}</div></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div class="fy-card"><div class="lbl">Toplam maliyet</div>'
+            f'<div class="val">₺{tr_num(maliyet_toplam, 2)}</div></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div class="fy-card"><div class="lbl">Toplam kâr/zarar</div>'
+            f'<div class="val {kz_cls}">₺{tr_num(acik_kz, 2)}</div>'
+            f'<div class="sub {kz_cls}">%{acik_kz_pct:+.2f}</div></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div class="fy-card"><div class="lbl">Fon sayısı</div>'
+            f'<div class="val">{len(poz)}</div></div>',
+            unsafe_allow_html=True,
+        )
+        if st.button("Fiyatları yenile", key="fy_yenile", use_container_width=True):
+            st.rerun()
+
+    with right:
+        tab_g, tab_l, tab_h, tab_r, tab_d = st.tabs([
+            "Genel", "Lotlar", "Getiri", "Risk", "Dağılım",
+        ])
+        with tab_g:
+            if not poz:
+                st.info("Excel yükleyin veya düzenlemeden fon ekleyin.")
+            else:
+                rows = []
+                for kod, p in poz.items():
+                    adet = float(p.get("adet") or 0)
+                    mal = float(p.get("maliyet") or 0)
+                    px = fiyatlar.get(kod)
+                    if px is None and p.get("excel_deger") and adet:
+                        try:
+                            px = float(p["excel_deger"]) / adet
+                        except Exception:
+                            px = mal
+                    deg = (px or mal) * adet
+                    kz = (px - mal) * adet if px is not None else 0.0
+                    kz_p = ((px / mal) - 1) * 100 if px and mal else 0.0
+                    rows.append({
+                        "kod": kod,
+                        "ad": (p.get("ad") or "")[:40],
+                        "adet": round(adet, 4),
+                        "maliyet": round(mal, 6),
+                        "fiyat": round(px, 6) if px is not None else None,
+                        "değer": round(deg, 2),
+                        "K/Z": round(kz, 2),
+                        "K/Z %": round(kz_p, 2),
+                        "ağırlık %": round(deg / deger_toplam * 100, 2) if deger_toplam else 0,
+                    })
+                pdf = pd.DataFrame(rows).sort_values("değer", ascending=False)
+                pdf_show = pdf.copy()
+                for col in ("adet", "maliyet", "fiyat", "değer", "K/Z", "K/Z %", "ağırlık %"):
+                    if col in pdf_show.columns:
+                        pdf_show[col] = pdf_show[col].map(
+                            lambda x: tr_num(x, 2 if col != "adet" else 4) if x is not None else "—"
+                        )
+                st.dataframe(pdf_show, hide_index=True, use_container_width=True, height=380)
+                download_excel_button(
+                    pdf,
+                    f"portfoyum_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    meta={"mod": "portfoyum", "kaynak": sp.get("kaynak")},
+                    key="xl_fy_out",
+                )
+
+        with tab_l:
+            lots = list(sp.get("lotlar") or [])
+            if not lots:
+                st.caption("Lot satırı yok (Excel Lotlar sayfasından gelir).")
+            else:
+                st.dataframe(pd.DataFrame(lots), hide_index=True, use_container_width=True, height=360)
+
+        with tab_h:
+            st.markdown("#### Aylık getiri & performans")
+            if not poz:
+                st.info("Pozisyon yok.")
+            else:
+                # Maliyet bazlı anlık K/Z
+                heat = []
+                for kod, p in poz.items():
+                    mal = float(p.get("maliyet") or 0)
+                    px = fiyatlar.get(kod) or mal
+                    pct = ((px / mal) - 1) * 100 if mal else 0.0
+                    heat.append({"kod": kod, "maliyet_getiri_%": round(pct, 2)})
+                hdf = pd.DataFrame(heat).sort_values("maliyet_getiri_%", ascending=False)
+                st.caption("Alış maliyetine göre toplam getiri %")
+                try:
+                    import plotly.express as px
+                    fig = px.bar(
+                        hdf, x="kod", y="maliyet_getiri_%", color="maliyet_getiri_%",
+                        color_continuous_scale=["#ff6b6b", "#888", "#3ddc97"],
+                        title="Pozisyon getirileri (maliyet bazlı) %",
+                    )
+                    fig.update_layout(
+                        template="plotly_dark", height=320,
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                except Exception:
+                    st.dataframe(hdf, hide_index=True)
+
+                # Aylık portföy getirisi (ağırlıklı fiyat serisi)
+                if st.button("Aylık getiri serisini hesapla", key="fy_aylik_btn"):
+                    st.session_state["_fy_aylik_calc"] = True
+                if st.session_state.get("_fy_aylik_calc"):
+                    with st.spinner("TEFAS fiyat serileri…"):
+                        try:
+                            analiz = get_analiz()
+                        except Exception:
+                            analiz = None
+                        series = {}
+                        wmap = {}
+                        for kod, p in poz.items():
+                            adet = float(p.get("adet") or 0)
+                            px0 = fiyatlar.get(kod) or float(p.get("maliyet") or 0)
+                            wmap[kod] = adet * px0
+                            fd = None
+                            if analiz is not None:
+                                try:
+                                    fd = analiz.api.fiyat(kod, periyod=12)
+                                except Exception:
+                                    fd = None
+                            if fd is None or getattr(fd, "empty", True):
+                                continue
+                            try:
+                                tcol = "tarih" if "tarih" in fd.columns else fd.columns[0]
+                                fcol = "fiyat" if "fiyat" in fd.columns else [c for c in fd.columns if c != tcol][0]
+                                s = fd[[tcol, fcol]].copy()
+                                s[tcol] = pd.to_datetime(s[tcol])
+                                s = s.set_index(tcol)[fcol].astype(float).sort_index()
+                                series[kod] = s
+                            except Exception:
+                                continue
+                        if len(series) < 1:
+                            st.warning("Yeterli fiyat serisi yok.")
+                        else:
+                            tw = sum(wmap.get(k, 0) for k in series) or 1.0
+                            # hizala
+                            all_idx = None
+                            for s in series.values():
+                                all_idx = s.index if all_idx is None else all_idx.union(s.index)
+                            all_idx = all_idx.sort_values()
+                            port = None
+                            for kod, s in series.items():
+                                w = (wmap.get(kod, 0) / tw)
+                                aligned = s.reindex(all_idx).ffill().bfill()
+                                part = aligned * w
+                                port = part if port is None else port + part
+                            # normalize to 100
+                            port = port.dropna()
+                            if len(port) < 5:
+                                st.warning("Seri kısa.")
+                            else:
+                                port_nav = port / float(port.iloc[0]) * 100.0
+                                # aylık getiri
+                                monthly = port_nav.resample("ME").last().dropna()
+                                if len(monthly) < 2:
+                                    monthly = port_nav.resample("M").last().dropna()
+                                mret = monthly.pct_change().dropna() * 100.0
+                                # Aylık tablo: getiri + NAV + kümülatif
+                                mnav = monthly.reindex(mret.index)
+                                cum = (1 + mret / 100.0).cumprod()
+                                mdf = pd.DataFrame({
+                                    "Ay": [d.strftime("%Y-%m") for d in mret.index],
+                                    "Aylık getiri %": [float(x) for x in mret.values],
+                                    "NAV (100=başlangıç)": [
+                                        float(mnav.loc[i]) if i in mnav.index else None
+                                        for i in mret.index
+                                    ],
+                                    "Kümülatif getiri %": [
+                                        float((cum.loc[i] - 1) * 100) for i in mret.index
+                                    ],
+                                })
+                                # Gösterim: TR ondalık ayırıcı
+                                mdf_show = mdf.copy()
+                                for col in ("Aylık getiri %", "NAV (100=başlangıç)", "Kümülatif getiri %"):
+                                    mdf_show[col] = mdf_show[col].map(
+                                        lambda x: tr_num(x, 2) if x is not None else "—"
+                                    )
+                                st.markdown("**Aylık portföy getirisi (tablo)**")
+                                st.dataframe(mdf_show, hide_index=True, use_container_width=True)
+                                # grafik için ham sayı
+                                mdf_plot = mdf.rename(columns={"Ay": "ay", "Aylık getiri %": "getiri_%"})
+                                try:
+                                    import plotly.express as px
+                                    fig2 = px.bar(
+                                        mdf_plot, x="ay", y="getiri_%", color="getiri_%",
+                                        color_continuous_scale=["#ff6b6b", "#888", "#3ddc97"],
+                                        title="Aylık getiri %",
+                                    )
+                                    fig2.update_layout(
+                                        template="plotly_dark", height=340,
+                                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                    )
+                                    st.plotly_chart(fig2, use_container_width=True)
+                                    fig3 = px.line(
+                                        x=port_nav.index, y=port_nav.values,
+                                        labels={"x": "Tarih", "y": "NAV (100=başlangıç)"},
+                                        title="Portföy NAV endeksi",
+                                    )
+                                    fig3.update_layout(
+                                        template="plotly_dark", height=320,
+                                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                    )
+                                    st.plotly_chart(fig3, use_container_width=True)
+                                except Exception as e:
+                                    st.caption(str(e))
+                                # özet
+                                pos = int((mret > 0).sum())
+                                neg = int((mret < 0).sum())
+                                c1, c2, c3, c4 = st.columns(4)
+                                c1.metric("Ort. aylık %", tr_num(float(mret.mean()), 2))
+                                c2.metric("En iyi ay %", tr_num(float(mret.max()), 2))
+                                c3.metric("En kötü ay %", tr_num(float(mret.min()), 2))
+                                c4.metric("Pozitif ay", f"{pos}/{pos+neg}")
+
+                                st.session_state["_fy_aylik_tablo"] = mdf
+                                st.session_state["_fy_port_nav"] = port_nav
+                                st.session_state["_fy_mret"] = mret
+                                st.session_state["_fy_series"] = series
+                                st.session_state["_fy_wmap"] = wmap
+
+                                # ── Fonaly tarzı: periyot + aylık ısı ızgarası + günlük istatistik ──
+                                st.markdown("---")
+                                st.markdown("##### Getiri haritası (aylık ızgara)")
+                                periyot = st.radio(
+                                    "Periyot",
+                                    ["Günlük", "Haftalık", "Aylık", "Çeyreklik"],
+                                    index=2,
+                                    horizontal=True,
+                                    key="fy_periyot_harita",
+                                )
+                                pret_d = port_nav.pct_change().dropna() * 100.0
+                                if periyot == "Günlük":
+                                    series_r = pret_d
+                                elif periyot == "Haftalık":
+                                    series_r = port_nav.resample("W").last().pct_change().dropna() * 100.0
+                                elif periyot == "Çeyreklik":
+                                    series_r = port_nav.resample("QE").last().pct_change().dropna() * 100.0
+                                else:
+                                    series_r = mret
+
+                                # Aylık ısı tablosu (yıl × ay)
+                                ay_ad = ["Oca", "Şub", "Mar", "Nis", "May", "Haz",
+                                         "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"]
+                                heat_rows = []
+                                if len(mret) > 0:
+                                    for y in sorted(set(mret.index.year)):
+                                        row = {"YIL": str(y)}
+                                        year_rets = []
+                                        for m in range(1, 13):
+                                            cell = mret[(mret.index.year == y) & (mret.index.month == m)]
+                                            if len(cell):
+                                                v = float(cell.iloc[-1])
+                                                row[ay_ad[m - 1]] = v
+                                                year_rets.append(v)
+                                            else:
+                                                row[ay_ad[m - 1]] = None
+                                        row["Toplam"] = float((pd.Series([1 + x/100 for x in year_rets]).prod() - 1) * 100) if year_rets else None
+                                        heat_rows.append(row)
+                                if heat_rows:
+                                    hgrid = pd.DataFrame(heat_rows)
+                                    # HTML renkli ızgara
+                                    def _cell_html(v):
+                                        if v is None or (isinstance(v, float) and (v != v)):
+                                            return '<td class="hm-empty">—</td>'
+                                        cls = "hm-pos" if v >= 0 else "hm-neg"
+                                        return f'<td class="{cls}">{tr_num(v, 2)}%</td>'
+                                    html = [
+                                        '<style>',
+                                        '.hm-wrap{overflow-x:auto;margin:8px 0 16px;}',
+                                        '.hm{border-collapse:collapse;width:100%;font-size:0.85rem;}',
+                                        '.hm th{color:#8fa3b8;padding:6px 8px;font-weight:600;}',
+                                        '.hm td{text-align:center;padding:8px 6px;border-radius:8px;margin:2px;}',
+                                        '.hm-pos{background:#1a3d32;color:#3ddc97;font-weight:600;}',
+                                        '.hm-neg{background:#3d1a1a;color:#ff6b6b;font-weight:600;}',
+                                        '.hm-empty{color:#556;}',
+                                        '.hm-y{color:#c5d0dc;font-weight:700;text-align:left;}',
+                                        '</style><div class="hm-wrap"><table class="hm"><tr><th>YIL</th>',
+                                    ]
+                                    for a in ay_ad:
+                                        html.append(f"<th>{a}</th>")
+                                    html.append("<th>Toplam</th></tr>")
+                                    for _, rr in hgrid.iterrows():
+                                        html.append(f'<tr><td class="hm-y">{rr["YIL"]}</td>')
+                                        for a in ay_ad:
+                                            html.append(_cell_html(rr.get(a)))
+                                        html.append(_cell_html(rr.get("Toplam")))
+                                        html.append("</tr>")
+                                    html.append("</table></div>")
+                                    st.markdown("".join(html), unsafe_allow_html=True)
+
+                                # Günlük getiri istatistik kartları
+                                st.markdown("##### Günlük getiri özeti")
+                                dret = pret_d
+                                if len(dret) >= 2:
+                                    pos_d = dret[dret > 0]
+                                    neg_d = dret[dret < 0]
+                                    n_d = len(dret)
+                                    n_pos_d = len(pos_d)
+                                    n_neg_d = len(neg_d)
+                                    pct_pos = n_pos_d / n_d * 100 if n_d else 0
+                                    pct_neg = n_neg_d / n_d * 100 if n_d else 0
+                                    g1, g2, g3, g4 = st.columns(4)
+                                    g1.metric("Ort. pozitif gün", f"%{tr_num(float(pos_d.mean()) if len(pos_d) else 0, 2)}")
+                                    g2.metric("En iyi gün", f"%{tr_num(float(dret.max()), 2)}")
+                                    g3.metric("Ort. negatif gün", f"%{tr_num(float(neg_d.mean()) if len(neg_d) else 0, 2)}")
+                                    g4.metric("En kötü gün", f"%{tr_num(float(dret.min()), 2)}")
+                                    st.markdown(
+                                        f"**Günlük getiri dağılımı** · {n_d} gün · "
+                                        f'<span style="color:#3ddc97">● %{tr_num(pct_pos,1)} Pozitif — {n_pos_d}</span> · '
+                                        f'<span style="color:#ff6b6b">● %{tr_num(pct_neg,1)} Negatif — {n_neg_d}</span>',
+                                        unsafe_allow_html=True,
+                                    )
+                                    # progress bars
+                                    st.progress(min(1.0, pct_pos / 100), text=f"Pozitif gün %{tr_num(pct_pos,1)}")
+                                    st.progress(min(1.0, pct_neg / 100), text=f"Negatif gün %{tr_num(pct_neg,1)}")
+
+                                    # Periyot seçimine göre özet tablo
+                                    if len(series_r) > 0:
+                                        st.markdown(f"**{periyot} getiri tablosu**")
+                                        if periyot == "Aylık":
+                                            pass  # already shown
+                                        else:
+                                            sdf = pd.DataFrame({
+                                                "Dönem": [
+                                                    (i.strftime("%Y-%m-%d") if hasattr(i, "strftime") else str(i))
+                                                    for i in series_r.index
+                                                ],
+                                                "Getiri %": [tr_num(float(x), 2) for x in series_r.values],
+                                            })
+                                            st.dataframe(sdf.tail(24), hide_index=True, use_container_width=True)
+
+        with tab_r:
+            st.markdown("#### Risk analizi & değerlendirme")
+            if len(poz) < 1:
+                st.info("Risk için pozisyon gerekli.")
+            else:
+                weights = []
+                labels = []
+                for kod, p in poz.items():
+                    px = fiyatlar.get(kod) or float(p.get("maliyet") or 0)
+                    weights.append(px * float(p.get("adet") or 0))
+                    labels.append(kod)
+                ssum = sum(weights) or 1
+                w = [x / ssum for x in weights]
+                herf = sum(x * x for x in w)
+                max_w = max(w) if w else 0
+                max_kod = labels[int(w.index(max_w))] if w else "—"
+                n_eff = (1.0 / herf) if herf > 0 else 0
+
+                # Seri tabanlı risk (varsa hesaplanmış veya şimdi çek)
+                vol_y = sharpe = maxdd = cvar = corr_mean = None
+                port_daily = None
+                series = st.session_state.get("_fy_series") or {}
+                wmap = st.session_state.get("_fy_wmap") or {}
+                if not series and st.button("Risk metriklerini hesapla (fiyat serisi)", key="fy_risk_calc"):
+                    st.session_state["_fy_aylik_calc"] = True  # aynı seriyi kullan
+                    st.info("Önce **Getiri** sekmesinde «Aylık getiri serisini hesapla»ya basın veya aşağıyı tekrar deneyin.")
+                if series:
+                    try:
+                        tw = sum(wmap.get(k, 0) for k in series) or 1.0
+                        all_idx = None
+                        for s in series.values():
+                            all_idx = s.index if all_idx is None else all_idx.union(s.index)
+                        all_idx = all_idx.sort_values()
+                        port = None
+                        rets_list = []
+                        for kod, s in series.items():
+                            ww = (wmap.get(kod, 0) / tw)
+                            aligned = s.reindex(all_idx).ffill().bfill()
+                            part = aligned * ww
+                            port = part if port is None else port + part
+                            r = aligned.pct_change().dropna()
+                            rets_list.append(r.rename(kod))
+                        port = port.dropna()
+                        pret = port.pct_change().dropna()
+                        port_daily = pret
+                        if len(pret) > 5:
+                            vol_y = float(pret.std() * (252 ** 0.5) * 100)
+                            mean_d = float(pret.mean())
+                            rf_d = 0.0
+                            try:
+                                rf_d = float(get_analiz().rf or 0) / 252.0
+                            except Exception:
+                                pass
+                            if pret.std() > 0:
+                                sharpe = float(((mean_d - rf_d) / pret.std()) * (252 ** 0.5))
+                            cum = (1 + pret).cumprod()
+                            peak = cum.cummax()
+                            dd = (cum / peak - 1)
+                            maxdd = float(dd.min() * 100)
+                            # CVaR %5
+                            q = float(pret.quantile(0.05))
+                            tail = pret[pret <= q]
+                            cvar = float(tail.mean() * 100) if len(tail) else float(q * 100)
+                        if len(rets_list) >= 2:
+                            rdf = pd.concat(rets_list, axis=1).dropna(how="all").fillna(0)
+                            if rdf.shape[1] >= 2:
+                                cm = rdf.corr()
+                                # ortalama çift korelasyon
+                                vals = []
+                                cols = list(cm.columns)
+                                for i in range(len(cols)):
+                                    for j in range(i + 1, len(cols)):
+                                        vals.append(float(cm.iloc[i, j]))
+                                corr_mean = float(sum(vals) / len(vals)) if vals else None
+                    except Exception as e:
+                        st.caption(f"Seri risk: {e}")
+
+                r1, r2, r3, r4 = st.columns(4)
+                r1.metric("Max ağırlık", f"%{max_w*100:.1f}", max_kod)
+                r2.metric("Herfindahl", f"{herf:.3f}")
+                r3.metric("Efektif fon sayısı", f"{n_eff:.1f}")
+                r4.metric("Fon adedi", len(poz))
+
+                r5, r6, r7, r8 = st.columns(4)
+                r5.metric("Yıllık vol %", f"{vol_y:.1f}" if vol_y is not None else "—")
+                r6.metric("Sharpe", f"{sharpe:.2f}" if sharpe is not None else "—")
+                r7.metric("Max DD %", f"{maxdd:.1f}" if maxdd is not None else "—")
+                r8.metric("CVaR %5 (gün)", f"{cvar:.2f}" if cvar is not None else "—")
+
+                if corr_mean is not None:
+                    st.metric("Ort. çift korelasyon", f"{corr_mean:.2f}")
+
+                # Değerlendirme metni
+                notes = []
+                score = 50
+                if max_w > 0.25:
+                    notes.append(f"⚠️ Tek fon ağırlığı yüksek (**{max_kod} %{max_w*100:.0f}**) — yoğunlaşma riski.")
+                    score -= 12
+                elif max_w <= 0.15:
+                    notes.append("✓ Ağırlıklar dağınık; tek fon baskın değil.")
+                    score += 8
+                if n_eff < 4:
+                    notes.append(f"⚠️ Efektif fon sayısı düşük (**{n_eff:.1f}**) — çeşitlendirme zayıf.")
+                    score -= 10
+                elif n_eff >= 8:
+                    notes.append(f"✓ Efektif çeşitlilik iyi (**{n_eff:.1f}**).")
+                    score += 8
+                if vol_y is not None:
+                    if vol_y >= 25:
+                        notes.append(f"⚠️ Yıllık volatilite yüksek (**%{vol_y:.0f}**).")
+                        score -= 10
+                    elif vol_y <= 12:
+                        notes.append(f"✓ Volatilite ılımlı (**%{vol_y:.0f}**).")
+                        score += 6
+                if maxdd is not None:
+                    if maxdd <= -25:
+                        notes.append(f"⚠️ Maksimum düşüş derin (**%{maxdd:.0f}**).")
+                        score -= 10
+                    elif maxdd > -12:
+                        notes.append(f"✓ Drawdown sığ (**%{maxdd:.0f}**).")
+                        score += 6
+                if sharpe is not None:
+                    if sharpe >= 1:
+                        notes.append(f"✓ Sharpe **{sharpe:.2f}** — risk-ayarlı getiri iyi.")
+                        score += 10
+                    elif sharpe < 0:
+                        notes.append(f"⚠️ Sharpe **{sharpe:.2f}** negatif.")
+                        score -= 8
+                if corr_mean is not None:
+                    if corr_mean >= 0.7:
+                        notes.append(f"⚠️ Fonlar birbirine çok bağlı (ort. corr **{corr_mean:.2f}**) — krizde birlikte düşebilir.")
+                        score -= 8
+                    elif corr_mean <= 0.35:
+                        notes.append(f"✓ Düşük korelasyon (**{corr_mean:.2f}**) çeşitlendirmeyi destekler.")
+                        score += 8
+                score = max(0, min(100, score))
+                if score >= 70:
+                    seviye = "İyi risk profili"
+                elif score >= 50:
+                    seviye = "Orta — iyileştirilebilir"
+                else:
+                    seviye = "Yüksek risk / zayıf çeşitlendirme"
+
+                st.markdown(f"##### Risk skoru: **{score}/100** — {seviye}")
+                for n in notes:
+                    st.markdown(f"- {n}")
+                st.caption(
+                    "Skor kural tabanlıdır; yatırım tavsiyesi değildir. "
+                    "Vol/Sharpe/MaxDD için **Getiri → Aylık getiri serisini hesapla** ile fiyat serisi gerekir."
+                )
+
+                # Ağırlık tablosu
+                wdf = pd.DataFrame({
+                    "kod": labels,
+                    "ağırlık_%": [round(x * 100, 2) for x in w],
+                }).sort_values("ağırlık_%", ascending=False)
+                st.dataframe(wdf, hide_index=True, use_container_width=True)
+
+
+        with tab_d:
+            st.markdown("#### Portföy dağılımı · kurum · kategori · risk · başarı")
+            if not poz or deger_toplam <= 0:
+                st.info("Dağılım için pozisyon gerekli.")
+            else:
+                def _kategori(ad: str, kod: str) -> str:
+                    t = f"{ad} {kod}".upper()
+                    if any(x in t for x in ("PARA PIYASASI", "PARA PİYASASI", "LIKIT", "LİKİT")):
+                        return "Para piyasası"
+                    if "BORÇLANMA" in t or "TAHVIL" in t or "BONO" in t:
+                        return "Borçlanma"
+                    if "KATILIM" in t:
+                        return "Katılım"
+                    if "HISSE" in t or "HİSSE" in t:
+                        return "Hisse senedi"
+                    if "FON SEPETI" in t or "FON SEPETİ" in t or "SEPET" in t:
+                        return "Fon sepeti"
+                    if "EMTIA" in t or "EMTİA" in t or "ALTIN" in t or "GUMUS" in t:
+                        return "Emtia"
+                    if "DEGISKEN" in t or "DEĞİŞKEN" in t:
+                        return "Değişken"
+                    if "SERBEST" in t:
+                        return "Serbest"
+                    if "KAR PAYI" in t or "KÂR PAYI" in t:
+                        return "Kâr payı / temettü"
+                    if "TEKNOLOJI" in t or "TEKNOLOJİ" in t or "INOVA" in t:
+                        return "Teknoloji"
+                    if "ISTATISTIKSEL" in t or "İSTATİSTİKSEL" in t or "ARBITRAJ" in t:
+                        return "Arbitraj / kantitatif"
+                    return "Diğer"
+
+                def _kurum(ad: str) -> str:
+                    t = (ad or "").upper()
+                    for key in (
+                        "İŞ PORTFÖY", "IS PORTFOY", "INVEO", "NEO PORTFÖY", "NEO PORTFOY",
+                        "TEB PORTFÖY", "STATECH", "FİBA", "FIBA", "ASTRA", "ATLAS",
+                        "ATA PORTFÖY", "KUVEYT", "HEDEF PORTFÖY", "NUROL", "TERA",
+                        "AZİMUT", "AZIMUT", "AK PORTFÖY", "GARANTİ", "YAPI KREDİ",
+                        "ZİRAAT", "HALK", "QNB", "HSBC", "OSMANLI",
+                    ):
+                        if key in t:
+                            return key.title().replace("Portfoy", "Portföy")
+                    # ilk iki kelime
+                    parts = (ad or "").split()
+                    if len(parts) >= 2:
+                        return f"{parts[0]} {parts[1]}"
+                    return parts[0] if parts else "Bilinmiyor"
+
+                def _risk_band(kat: str, getiri_pct: float | None) -> str:
+                    if kat in ("Para piyasası",):
+                        return "Düşük"
+                    if kat in ("Borçlanma", "Katılım") and "Hisse" not in kat:
+                        return "Düşük-Orta"
+                    if kat in ("Hisse senedi", "Serbest", "Arbitraj / kantitatif", "Teknoloji"):
+                        return "Yüksek"
+                    if kat in ("Değişken", "Fon sepeti", "Emtia", "Kâr payı / temettü"):
+                        return "Orta"
+                    return "Orta"
+
+                rows_d = []
+                for kod, p in poz.items():
+                    adet = float(p.get("adet") or 0)
+                    mal = float(p.get("maliyet") or 0)
+                    px = fiyatlar.get(kod)
+                    if px is None and p.get("excel_deger") and adet:
+                        try:
+                            px = float(p["excel_deger"]) / adet
+                        except Exception:
+                            px = mal
+                    px = px if px is not None else mal
+                    deg = adet * px
+                    kz_p = ((px / mal) - 1) * 100 if mal else 0.0
+                    ad = p.get("ad") or kod
+                    kat = _kategori(ad, kod)
+                    rows_d.append({
+                        "kod": kod,
+                        "ad": ad[:50],
+                        "değer": deg,
+                        "ağırlık_%": deg / deger_toplam * 100,
+                        "K/Z_%": kz_p,
+                        "kategori": kat,
+                        "kurum": _kurum(ad),
+                        "risk": _risk_band(kat, kz_p),
+                        "basari": "Pozitif" if kz_p >= 0 else "Negatif",
+                    })
+                ddf = pd.DataFrame(rows_d)
+
+                # Başarı oranı
+                n_pos = int((ddf["K/Z_%"] >= 0).sum())
+                n_neg = int((ddf["K/Z_%"] < 0).sum())
+                n_all = len(ddf)
+                basari_adet = (n_pos / n_all * 100) if n_all else 0
+                # değer ağırlıklı başarı
+                pos_val = float(ddf.loc[ddf["K/Z_%"] >= 0, "değer"].sum())
+                basari_deger = (pos_val / deger_toplam * 100) if deger_toplam else 0
+                # kâr eden pozisyonların toplam K/Z payı
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Başarı oranı (adet)", f"%{basari_adet:.0f}", f"{n_pos}/{n_all} pozitif")
+                c2.metric("Başarı (değer ağırlıklı)", f"%{basari_deger:.0f}")
+                c3.metric("Ort. K/Z %", f"{float(ddf['K/Z_%'].mean()):+.1f}")
+                c4.metric("Medyan K/Z %", f"{float(ddf['K/Z_%'].median()):+.1f}")
+
+                try:
+                    import plotly.express as px
+                    # Fon bazlı
+                    col_f, col_p = st.columns([1.1, 1.2])
+                    with col_f:
+                        st.markdown("**Fon dağılımı**")
+                        st.caption("Portföyünüzdeki fonların toplam değer içindeki ağırlığı.")
+                        fig0 = px.pie(ddf, names="kod", values="değer", hole=0.55, title=None)
+                        fig0.update_layout(
+                            template="plotly_dark", height=300,
+                            paper_bgcolor="rgba(0,0,0,0)", margin=dict(t=10, b=10, l=10, r=10),
+                            showlegend=False,
+                        )
+                        st.plotly_chart(fig0, use_container_width=True)
+                        # sıralı liste (Fonaly tarzı)
+                        ranked = ddf.sort_values("ağırlık_%", ascending=False)
+                        list_html = ['<div style="font-size:0.92rem;line-height:1.85">']
+                        for _, rr in ranked.iterrows():
+                            list_html.append(
+                                f'<div style="display:flex;justify-content:space-between;border-bottom:1px solid #1e2a3a;padding:4px 0">'
+                                f'<span><b>{rr["kod"]}</b></span>'
+                                f'<span>{tr_num(rr["ağırlık_%"], 1)}%</span></div>'
+                            )
+                        list_html.append("</div>")
+                        st.markdown("".join(list_html), unsafe_allow_html=True)
+                    with col_p:
+                        st.markdown("**Portföy / kategori dağılımı**")
+                        st.caption(f"Toplam: ₺{tr_num(deger_toplam, 2)} · Portföy %100")
+                        cdf = ddf.groupby("kategori", as_index=False)["değer"].sum().sort_values("değer", ascending=False)
+                        cdf["pay_%"] = cdf["değer"] / cdf["değer"].sum() * 100
+                        for _, rr in cdf.iterrows():
+                            pay = float(rr["pay_%"])
+                            st.markdown(
+                                f"**{rr['kategori']}** · %{tr_num(pay, 2)} · ₺{tr_num(rr['değer'], 2)}"
+                            )
+                            st.progress(min(1.0, max(0.0, pay / 100.0)))
+
+                    st.markdown("##### Aracı kurum / portföy şirketi payı")
+                    kdf = ddf.groupby("kurum", as_index=False)["değer"].sum().sort_values("değer", ascending=False)
+                    kdf["pay_%"] = kdf["değer"] / kdf["değer"].sum() * 100
+                    fig1 = px.pie(kdf, names="kurum", values="değer", hole=0.4, title="Kurum dağılımı")
+                    fig1.update_layout(template="plotly_dark", height=360, paper_bgcolor="rgba(0,0,0,0)")
+                    st.plotly_chart(fig1, use_container_width=True)
+                    kshow = kdf.copy()
+                    kshow["değer"] = kshow["değer"].map(lambda x: tr_num(x, 2))
+                    kshow["pay_%"] = kshow["pay_%"].map(lambda x: tr_num(x, 2))
+                    st.dataframe(kshow, hide_index=True, use_container_width=True)
+
+                    # Risk bandı
+                    st.markdown("##### Risk bandı dağılımı")
+                    rdf = ddf.groupby("risk", as_index=False)["değer"].sum()
+                    order = ["Düşük", "Düşük-Orta", "Orta", "Yüksek"]
+                    rdf["risk"] = pd.Categorical(rdf["risk"], categories=order, ordered=True)
+                    rdf = rdf.sort_values("risk")
+                    fig3 = px.pie(rdf, names="risk", values="değer", hole=0.4, title="Risk bandı (kategori tahmini)")
+                    fig3.update_layout(template="plotly_dark", height=340, paper_bgcolor="rgba(0,0,0,0)")
+                    st.plotly_chart(fig3, use_container_width=True)
+
+                    # Başarı: pozitif vs negatif
+                    st.markdown("##### Başarı (K/Z işareti)")
+                    bdf = ddf.groupby("basari", as_index=False).agg(adet=("kod", "count"), değer=("değer", "sum"))
+                    fig4 = px.bar(bdf, x="basari", y="değer", color="basari",
+                                  color_discrete_map={"Pozitif": "#3ddc97", "Negatif": "#ff6b6b"},
+                                  title="Pozitif / negatif pozisyon değeri")
+                    fig4.update_layout(template="plotly_dark", height=320, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+                    st.plotly_chart(fig4, use_container_width=True)
+
+                except Exception as e:
+                    st.caption(f"Grafik: {e}")
+                    st.dataframe(ddf, hide_index=True)
+
+                st.markdown("##### Detay tablo")
+                show_cols = ["kod", "ad", "kategori", "kurum", "risk", "ağırlık_%", "K/Z_%", "değer", "basari"]
+                dshow = ddf[show_cols].sort_values("ağırlık_%", ascending=False).copy()
+                dshow["ağırlık_%"] = dshow["ağırlık_%"].map(lambda x: tr_num(x, 2))
+                dshow["K/Z_%"] = dshow["K/Z_%"].map(lambda x: tr_num(x, 2, force_sign=True))
+                dshow["değer"] = dshow["değer"].map(lambda x: tr_num(x, 2))
+                st.dataframe(dshow, hide_index=True, use_container_width=True, height=320)
+                st.session_state["_fy_dagilim_df"] = ddf
+
+                # Kısa analiz
+                top_kat = ddf.groupby("kategori")["değer"].sum().idxmax() if len(ddf) else "—"
+                top_kur = ddf.groupby("kurum")["değer"].sum().idxmax() if len(ddf) else "—"
+                yuksek_risk_pay = float(ddf.loc[ddf["risk"] == "Yüksek", "değer"].sum() / deger_toplam * 100) if deger_toplam else 0
+                st.info(
+                    f"**Dağılım özeti:** En büyük kategori **{top_kat}** · en büyük kurum **{top_kur}** · "
+                    f"yüksek risk bandı payı **%{yuksek_risk_pay:.0f}** · başarı (adet) **%{basari_adet:.0f}**. "
+                    "Kategori/risk ad tahminidir (fon unvanından); resmi TEFAS şeması değildir."
+                )
+
+    # ── Portföyü analiz et + güçlü / uyarı / akıllı tavsiye ──
+    st.markdown("---")
+    st.markdown("### 🧠 Portföy analizi · güçlü yönler · uyarılar · akıllı tavsiye")
+    cbtn1, cbtn2 = st.columns([1, 1])
+    with cbtn1:
+        if st.button("Portföyü analiz et", type="primary", key="fy_analiz_btn"):
+            st.session_state["_fy_analiz_run"] = True
+    with cbtn2:
+        auto_show = st.checkbox(
+            "Portföy yüklüyken paneli açık tut",
+            value=True,
+            key="fy_panel_auto",
+        )
+    if auto_show and poz:
+        st.session_state["_fy_analiz_run"] = True
+    if st.session_state.get("_fy_excel_just_loaded"):
+        st.session_state["_fy_excel_just_loaded"] = False
+        st.session_state["_fy_analiz_run"] = True
+
+    if st.session_state.get("_fy_analiz_run") and poz:
+        ddf = st.session_state.get("_fy_dagilim_df")
+        if ddf is None or getattr(ddf, "empty", True):
+            rows_d = []
+            for kod, p in poz.items():
+                adet = float(p.get("adet") or 0)
+                mal = float(p.get("maliyet") or 0)
+                px = fiyatlar.get(kod) or mal
+                deg = adet * float(px or 0)
+                kz_p = ((float(px) / mal) - 1) * 100 if mal and px else 0.0
+                rows_d.append({
+                    "kod": kod,
+                    "değer": deg,
+                    "K/Z_%": kz_p,
+                    "ağırlık_%": deg / deger_toplam * 100 if deger_toplam else 0,
+                })
+            ddf = pd.DataFrame(rows_d)
+
+        guclu, uyarılar, tavsiyeler = [], [], []
+        n_pos = int((ddf["K/Z_%"] >= 0).sum())
+        n_neg = int((ddf["K/Z_%"] < 0).sum())
+        n_all = len(ddf)
+        basari = n_pos / n_all * 100 if n_all else 0
+        pos_val = float(ddf.loc[ddf["K/Z_%"] >= 0, "değer"].sum()) if "değer" in ddf.columns else 0.0
+        basari_deger = (pos_val / deger_toplam * 100) if deger_toplam else 0.0
+
+        if basari >= 70:
+            guclu.append(f"Başarı oranı yüksek: **%{basari:.0f}** ({n_pos}/{n_all} pozitif).")
+        if basari_deger >= 80:
+            guclu.append(f"Değerin **%{basari_deger:.0f}**’i kârda.")
+        if acik_kz_pct >= 30:
+            guclu.append(f"Toplam getiri güçlü: **%{acik_kz_pct:+.1f}** (₺{acik_kz:,.0f}).")
+        if "ağırlık_%" in ddf.columns and float(ddf["ağırlık_%"].max()) <= 18:
+            guclu.append("Tek fon baskın değil; ağırlıklar dengeli (max ≤ %18).")
+        if n_all >= 8:
+            guclu.append(f"Çeşitlilik: **{n_all}** fon.")
+
+        if basari < 50:
+            uyarılar.append(f"Başarı oranı düşük (**%{basari:.0f}**); {n_neg} pozisyon zarar yazıyor.")
+        if acik_kz_pct < 0:
+            uyarılar.append(f"Portföy maliyet altında: **%{acik_kz_pct:.1f}**.")
+        if "ağırlık_%" in ddf.columns:
+            mx = float(ddf["ağırlık_%"].max())
+            mxk = str(ddf.loc[ddf["ağırlık_%"].idxmax(), "kod"])
+            if mx > 20:
+                uyarılar.append(f"**{mxk}** tek başına **%{mx:.0f}** — yoğunlaşma riski.")
+            if mx > 30:
+                uyarılar.append(f"Kritik yoğunlaşma: {mxk} > %30.")
+        deep = ddf[ddf["K/Z_%"] <= -25]
+        for _, r in deep.iterrows():
+            uyarılar.append(f"**{r['kod']}** derin zarar **%{float(r['K/Z_%']):.0f}**")
+        if n_all < 4:
+            uyarılar.append("Fon sayısı çok az — idiyosenkratik risk yüksek.")
+        if n_all > 30:
+            uyarılar.append("30+ fon: izleme zorlaşır.")
+
+        if basari < 50 or n_neg >= 3:
+            tavsiyeler.append("Zarar eden fonları gözden geçirin; tez yoksa kademeli azaltın.")
+        if "ağırlık_%" in ddf.columns and float(ddf["ağırlık_%"].max()) > 20:
+            mxk = str(ddf.loc[ddf["ağırlık_%"].idxmax(), "kod"])
+            tavsiyeler.append(f"**{mxk}** payını %15 altına çekin veya düşük vol tampon ekleyin.")
+        for _, r in deep.head(3).iterrows():
+            tavsiyeler.append(f"**{r['kod']}**: çıkış planı veya pay tavanı (şu an %{float(r['K/Z_%']):.0f}).")
+        if acik_kz_pct >= 80:
+            tavsiyeler.append("Yüksek kâr: bir kısmını para piyasasına realize etmeyi değerlendirin.")
+        if n_all < 6:
+            tavsiyeler.append("Para piyasası / hisse / değişken kategorilerinden çeşitlendirin.")
+        dfull = st.session_state.get("_fy_dagilim_df")
+        if dfull is not None and "kurum" in getattr(dfull, "columns", []):
+            kshare = dfull.groupby("kurum")["değer"].sum()
+            if len(kshare) and float(kshare.max() / kshare.sum()) > 0.4:
+                tavsiyeler.append(
+                    f"Tek kurum (**{kshare.idxmax()}**) %{float(kshare.max()/kshare.sum()*100):.0f} — kurum riskini dağıtın."
+                )
+        if not tavsiyeler:
+            tavsiyeler.append("Kritik kırmızı bayrak yok; periyodik rebalance yeterli olabilir.")
+
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("Başarı (adet) %", f"{basari:.0f}", f"{n_pos}/{n_all}")
+        a2.metric("Başarı (değer) %", f"{basari_deger:.0f}")
+        a3.metric("Toplam K/Z %", f"{acik_kz_pct:+.1f}")
+        a4.metric("Pozisyon", n_all)
+
+        if guclu:
+            st.success("### ✓ Güçlü yönler\n" + "\n".join(f"- {x}" for x in guclu))
+        else:
+            st.info("Güçlü yön henüz işaretlenmedi.")
+        if uyarılar:
+            st.warning("### ⚠ Uyarılar\n" + "\n".join(f"- {x}" for x in uyarılar))
+        else:
+            st.success("Kritik uyarı yok.")
+        st.info("### 💡 Akıllı tavsiyeler\n" + "\n".join(f"- {x}" for x in tavsiyeler))
+        st.caption(
+            "Excel sonrası panel otomatik açılır. "
+            "Kurallar: başarı, yoğunlaşma, derin zarar, çeşitlilik, kurum payı. **Yatırım tavsiyesi değildir.**"
+        )
+    elif not poz:
+        st.caption("Önce Excel yükleyin — panel o zaman dolar.")
+
+    st.caption("Excel Özet/Lotlar formatı desteklenir. Canlı fiyat TEFAS; yoksa Excel değer kullanılır.")
 
 elif sayfa == "🎯 Optimizasyon":
     st.header("🎯 Portföy Optimizasyonu")
@@ -5513,8 +7587,8 @@ elif sayfa == "🏦 BIST Değerleme":
     st.caption(
         f"Takvim / aktif bilanço dönemi: **{_bd_bist.get('etiket')}** "
         f"({_bd_bist.get('aciklama') or '—'}). "
-        "Tek hisse raporlarında İş Yatırım’da **dolu olan en yeni dönem** (ör. 2026/9) kullanılır; "
-        "eski çeyrek (2026/6) yok sayılır."
+        "Her hisse için İş Yatırım’da **dolu en yeni dönem** (ör. ISDMR **2026/9**) rapor ve sıralamaya yazılır; "
+        "eski kolon (2026/6) güncel kabul edilmez."
     )
     # tefas_bist modülüne dönem bilgisini ilet (varsa okur)
     try:
@@ -5591,10 +7665,16 @@ elif sayfa == "🏦 BIST Değerleme":
                 err_u = str(e)
             deg_u = {}
             if info_u:
-                if info_u.get("trailingPE") is not None:
-                    deg_u["F/K"] = info_u.get("trailingPE")
-                if info_u.get("priceToBook") is not None:
-                    deg_u["PD/DD"] = info_u.get("priceToBook")
+                # F/K / PD/DD yalnızca İş Yatırım
+                try:
+                    _ic = deg_from_isyatirim(kod_u)
+                    if not _ic.get("_error"):
+                        if _ic.get("F/K") is not None:
+                            deg_u["F/K"] = _ic["F/K"]
+                        if _ic.get("PD/DD") is not None:
+                            deg_u["PD/DD"] = _ic["PD/DD"]
+                except Exception:
+                    pass
             # İş Yatırım oranları varsa ekle
             try:
                 isy_u = isyatirim_mali_tablo(kod_u)
@@ -5658,7 +7738,7 @@ elif sayfa == "🏦 BIST Değerleme":
             meta={"mod": "bist_birlesik_profil", "siralama": "yuksek_dusuk"},
             key="xl_bist_birlesik",
         )
-        st.caption("1. satır = en yüksek birleşik ortalama; son satırlar daha düşük.")
+        st.caption("1. satır = en yüksek birleşik ortalama. **bilanco_donem** sütunu her hissenin İş Yatırım güncel dönemidir (ör. ISDMR → 2026/9).")
 
     try:
         try:
@@ -6403,6 +8483,12 @@ elif sayfa == "🔎 Hisse Detay":
         st.write("")
         run = st.button("🔍 Analiz et", type="primary", use_container_width=True, key="btn_hisse_detay")
 
+    # Mali tablo zorla yenile → otomatik yeniden analiz
+    if st.session_state.pop("_hisse_auto_analiz", False) and not run:
+        run = True
+        if st.session_state.get("hisse_kod_input"):
+            raw_kod = st.session_state["hisse_kod_input"]
+
     if run and raw_kod:
         st.session_state.hisse_detay_kod = raw_kod
         sembol = _hisse_sembol_normalize(raw_kod)
@@ -6458,6 +8544,16 @@ elif sayfa == "🔎 Hisse Detay":
         info = det.get("info") or {}
         deg = _degerleme_from_info(info)
         kod = det.get("kod") or ""
+        # İş Yatırım çarpanları Yahoo üzerine yazar (F/K hatasını önler)
+        try:
+            _isy_c = deg_from_isyatirim(kod)
+            if not _isy_c.get("_error"):
+                for _ck in ("F/K", "PD/DD", "FD/FAVÖK", "FD/Satış", "fiyat", "piyasa_değeri"):
+                    if _isy_c.get(_ck) is not None:
+                        deg[_ck] = _isy_c[_ck]
+                deg["_kaynak_carpan"] = "İş Yatırım"
+        except Exception:
+            pass
         sembol = det.get("sembol") or kod
         ad = deg.get("şirket") or deg.get("kısa_ad") or info.get("longName") or sembol
         sektor = deg.get("sektör") or info.get("sector") or "—"
@@ -6553,7 +8649,9 @@ elif sayfa == "🔎 Hisse Detay":
             if k not in ("bilanco_df", "gelir_df", "nakit_df")
         }
 
-        tab_g, tab_mt, tab_tem, tab_tek, tab_r, tab_d, tab_v, tab_x = st.tabs([
+        tab_oz, tab_sk, tab_g, tab_mt, tab_tem, tab_tek, tab_r, tab_d, tab_v, tab_x = st.tabs([
+            "🏢 Şirket Özeti",
+            "📋 Skor Kart",
             "📈 Grafikler",
             "📑 Mali Tablo",
             "🏛️ Temel Analiz",
@@ -6563,6 +8661,326 @@ elif sayfa == "🔎 Hisse Detay":
             "📝 Değerlendirme",
             "📥 Excel / HTML",
         ])
+
+        # ── Fintables tarzı şirket özeti ──────────────────────────────────
+        with tab_oz:
+            st.markdown("#### Şirket özeti · Fintables tarzı")
+            st.caption(
+                "Özet kart, karne (kârlılık / büyüme / borç / değerleme), çarpanlar ve oranlar. "
+                "Veri: **İş Yatırım**. [Fintables örnek](https://fintables.com/sirketler/A1CAP) benzeri düzen."
+            )
+            _karne = fintables_tarzi_karne(_core_bil if isinstance(_core_bil, dict) else {}, deg, m)
+            det["fintables_karne"] = _karne
+
+            # Üst KPI şeridi
+            k1, k2, k3, k4, k5, k6 = st.columns(6)
+            k1.metric("Fiyat", fmt_num(deg.get("fiyat") or m.get("fiyat"), 2))
+            k2.metric("F/K", fmt_num(deg.get("F/K"), 1))
+            k3.metric("PD/DD", fmt_num(deg.get("PD/DD"), 2))
+            k4.metric("FD/FAVÖK", fmt_num(deg.get("FD/FAVÖK"), 1))
+            k5.metric("Piyasa değeri", _fmt_tl(deg.get("piyasa_değeri")) if deg.get("piyasa_değeri") else "—")
+            k6.metric("Bilanço", _core_bil.get("gunce_donem") or _bil.get("etiket") or "—")
+            if deg.get("_kaynak_carpan") or deg.get("_kaynak"):
+                st.caption(f"Çarpan kaynağı: **{deg.get('_kaynak_carpan') or deg.get('_kaynak')}** (Yahoo F/K kullanılmaz)")
+
+            st.markdown("##### Fintables tarzı karne")
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Genel", f"{_karne.get('genel')}/100", _karne.get("harf"))
+            c2.metric("Kârlılık", f"{_karne.get('karlilik')}/100")
+            c3.metric("Büyüme", f"{_karne.get('buyume')}/100")
+            c4.metric("Borçluluk*", f"{_karne.get('borcluluk')}/100")
+            c5.metric("Değerleme*", f"{_karne.get('degerleme')}/100")
+            st.caption("*Borçluluk: yüksek skor = daha sağlıklı borç/likidite. Değerleme: yüksek = görece ucuz çarpan.")
+            st.info(_karne.get("yorum") or "")
+
+            mm = _karne.get("metrikler") or {}
+            st.markdown("##### Oran analizi (likidite · kaldıraç · kârlılık)")
+            oran_rows = [
+                {"Grup": "Kârlılık", "Oran": "ROE %", "Değer": mm.get("ROE")},
+                {"Grup": "Kârlılık", "Oran": "Net marj %", "Değer": mm.get("net_marj")},
+                {"Grup": "Büyüme", "Oran": "Satış YoY %", "Değer": mm.get("satis_yoy")},
+                {"Grup": "Büyüme", "Oran": "Net kâr YoY %", "Değer": mm.get("net_yoy")},
+                {"Grup": "Likidite", "Oran": "Cari oran", "Değer": mm.get("cari")},
+                {"Grup": "Kaldıraç", "Oran": "Borç / özkaynak", "Değer": mm.get("borc_oz")},
+                {"Grup": "Değerleme", "Oran": "F/K", "Değer": mm.get("F/K")},
+                {"Grup": "Değerleme", "Oran": "PD/DD", "Değer": mm.get("PD/DD")},
+            ]
+            st.dataframe(pd.DataFrame(oran_rows), hide_index=True, use_container_width=True)
+
+            # Bilanço yapısı mini
+            oz = (_core_bil.get("ozet") if isinstance(_core_bil, dict) else None) or {}
+            if oz:
+                st.markdown("##### Bilanço / gelir özeti (güncel dönem)")
+                orows = []
+                for key, lab in [
+                    ("hasilat", "Satışlar"),
+                    ("brut_kar", "Brüt kâr"),
+                    ("esas_faaliyet_kari", "Faaliyet kârı"),
+                    ("net_donem_kari", "Net kâr"),
+                    ("nakit", "Nakit"),
+                    ("ozkaynaklar", "Özkaynak"),
+                    ("toplam_varliklar", "Toplam varlık"),
+                    ("kisa_vadeli_yukumluluk", "KV yükümlülük"),
+                ]:
+                    it = oz.get(key) or {}
+                    if isinstance(it, dict) and it.get("deger") is not None:
+                        orows.append({
+                            "Kalem": lab,
+                            "Tutar": _fmt_tl(it.get("deger")),
+                            "YoY %": it.get("degisim_%"),
+                        })
+                if orows:
+                    st.dataframe(pd.DataFrame(orows), hide_index=True, use_container_width=True)
+
+            # Marj trendi grafik (çok dönem)
+            col_labels = list((_core_bil.get("col_labels") if isinstance(_core_bil, dict) else None) or [])
+            gdf = _core_bil.get("gelir_df") if isinstance(_core_bil, dict) else None
+            if gdf is not None and not getattr(gdf, "empty", True) and col_labels and "kod" in gdf.columns:
+                def _row_vals(codes):
+                    for c in codes:
+                        hit = gdf[gdf["kod"].astype(str) == c]
+                        if hit.empty:
+                            continue
+                        r0 = hit.iloc[0]
+                        vals = []
+                        for lab in col_labels:
+                            try:
+                                vals.append(float(r0.get(lab)) if r0.get(lab) is not None else None)
+                            except (TypeError, ValueError):
+                                vals.append(None)
+                        return vals
+                    return None
+                sat_v = _row_vals(("3C", "3A"))
+                net_v = _row_vals(("3L", "3J"))
+                if sat_v and net_v:
+                    marj_tr = []
+                    for i, lab in enumerate(col_labels):
+                        s, n = sat_v[i] if i < len(sat_v) else None, net_v[i] if i < len(net_v) else None
+                        if s and n is not None and s != 0:
+                            marj_tr.append({"dönem": lab, "net_marj_%": round(n / s * 100, 1)})
+                    if marj_tr:
+                        st.markdown("##### Net marj trendi (dönemler)")
+                        st.line_chart(pd.DataFrame(marj_tr).set_index("dönem"))
+
+            # Dış linkler
+            st.markdown("##### Kaynaklar")
+            lc1, lc2, lc3 = st.columns(3)
+            with lc1:
+                st.markdown(f"[İş Yatırım şirket kartı](https://www.isyatirim.com.tr/tr-tr/analiz/hisse/Sayfalar/sirket-karti.aspx?hisse={kod})")
+            with lc2:
+                st.markdown(f"[Fintables {kod}](https://fintables.com/sirketler/{kod})")
+            with lc3:
+                st.markdown(f"[KAP / BIST](https://www.kap.org.tr/tr/)` · yfinance {sembol}`")
+
+            # Excel: mali tablo + karne
+            if st.button("Excel’e aktar (özet + mali tablo)", key="btn_ft_excel"):
+                try:
+                    from io import BytesIO
+                    bio = BytesIO()
+                    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+                        pd.DataFrame([_karne]).to_excel(writer, sheet_name="Karne", index=False)
+                        pd.DataFrame(oran_rows).to_excel(writer, sheet_name="Oranlar", index=False)
+                        if isinstance(_core_bil, dict):
+                            bdf = _core_bil.get("bilanco_df")
+                            gdf2 = _core_bil.get("gelir_df")
+                            if bdf is not None and not getattr(bdf, "empty", True):
+                                bdf.to_excel(writer, sheet_name="Bilanço", index=False)
+                            if gdf2 is not None and not getattr(gdf2, "empty", True):
+                                gdf2.to_excel(writer, sheet_name="Gelir", index=False)
+                    st.download_button(
+                        "İndir Excel",
+                        data=bio.getvalue(),
+                        file_name=f"sirket_ozet_{kod}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_ft_xlsx",
+                    )
+                except Exception as e:
+                    st.warning(f"Excel: {e}")
+
+        with tab_sk:
+            st.markdown("#### Skor Kart · Halk Yatırım Analizim tarzı")
+            st.caption(
+                "Tablolar: fiyat performansı · piyasa değeri · teknik · temel · fiyat özeti. "
+                f"[Halk Yatırım Skor Kart](https://analizim.halkyatirim.com.tr/Financial/ScoreCardDetail?hisseKod={kod}) benzeri düzen. "
+                "Veri: İş Yatırım + yfinance OHLCV. Yatırım tavsiyesi değildir."
+            )
+
+            # ── 1) Fiyat özeti ──
+            st.markdown("##### 1) Fiyat özeti")
+            fd = det.get("fiyat_df")
+            last_px = deg.get("fiyat") or m.get("fiyat")
+            prev = None
+            high52 = low52 = None
+            if fd is not None and not getattr(fd, "empty", True) and "fiyat" in fd.columns:
+                s = pd.to_numeric(fd["fiyat"], errors="coerce").dropna()
+                if len(s) >= 2:
+                    last_px = float(s.iloc[-1])
+                    prev = float(s.iloc[-2])
+                if len(s) >= 5:
+                    tail = s.tail(min(252, len(s)))
+                    high52 = float(tail.max())
+                    low52 = float(tail.min())
+            gunluk_pct = ((last_px / prev - 1) * 100) if last_px and prev else None
+            fy_rows = [
+                {"Alan": "Son fiyat", "Değer": fmt_num(last_px, 2)},
+                {"Alan": "Günlük değişim %", "Değer": f"%{gunluk_pct:+.2f}" if gunluk_pct is not None else "—"},
+                {"Alan": "52h yüksek", "Değer": fmt_num(high52, 2)},
+                {"Alan": "52h düşük", "Değer": fmt_num(low52, 2)},
+                {"Alan": "52h konumu %", "Değer": (
+                    f"%{((last_px - low52) / (high52 - low52) * 100):.0f}"
+                    if last_px and high52 and low52 and high52 != low52 else "—"
+                )},
+                {"Alan": "Kaynak çarpan", "Değer": deg.get("_kaynak_carpan") or deg.get("_kaynak") or "İş Yatırım"},
+            ]
+            st.dataframe(pd.DataFrame(fy_rows), hide_index=True, use_container_width=True)
+
+            # ── 2) Fiyat performansı ──
+            st.markdown("##### 2) Fiyat performansı")
+            perf_map = [
+                ("1 hafta", "getiri_1h", 5),
+                ("1 ay", "getiri_1a", 22),
+                ("3 ay", "getiri_3a", 66),
+                ("6 ay", "getiri_6a", 132),
+                ("1 yıl", "getiri_1y", 252),
+                ("Yılbaşından", "getiri_ytd", None),
+            ]
+            perf_rows = []
+            s_px = None
+            if fd is not None and not getattr(fd, "empty", True) and "fiyat" in fd.columns:
+                s_px = pd.to_numeric(fd["fiyat"], errors="coerce").dropna()
+            for label, key, bars in perf_map:
+                val = m.get(key)
+                if val is None and s_px is not None and bars and len(s_px) > bars:
+                    try:
+                        val = (float(s_px.iloc[-1]) / float(s_px.iloc[-bars - 1]) - 1) * 100
+                    except Exception:
+                        val = None
+                if val is None and key == "getiri_ytd" and s_px is not None and len(s_px) > 5:
+                    try:
+                        # approximate: from start of series year if possible
+                        if "tarih" in fd.columns:
+                            tfd = fd.copy()
+                            tfd["tarih"] = pd.to_datetime(tfd["tarih"])
+                            y0 = tfd[tfd["tarih"].dt.year == tfd["tarih"].dt.year.max()]
+                            if len(y0) > 1:
+                                val = (float(y0["fiyat"].iloc[-1]) / float(y0["fiyat"].iloc[0]) - 1) * 100
+                    except Exception:
+                        pass
+                perf_rows.append({
+                    "Dönem": label,
+                    "Getiri %": round(float(val), 2) if val is not None else None,
+                    "Yorum": (
+                        "Güçlü" if val is not None and val >= 15 else
+                        ("Zayıf" if val is not None and val <= -10 else
+                         ("Nötr" if val is not None else "—"))
+                    ),
+                })
+            st.dataframe(pd.DataFrame(perf_rows), hide_index=True, use_container_width=True)
+
+            # ── 3) Piyasa değeri & çarpanlar ──
+            st.markdown("##### 3) Piyasa değeri ve çarpanlar")
+            mcap = deg.get("piyasa_değeri")
+            pd_rows = [
+                {"Gösterge": "Piyasa değeri", "Değer": _fmt_tl(mcap) if mcap else "—", "Not": "İş Yatırım"},
+                {"Gösterge": "F/K", "Değer": fmt_num(deg.get("F/K"), 2), "Not": "İş Yatırım şirket kartı"},
+                {"Gösterge": "PD/DD", "Değer": fmt_num(deg.get("PD/DD"), 2), "Not": "İş Yatırım"},
+                {"Gösterge": "FD/FAVÖK", "Değer": fmt_num(deg.get("FD/FAVÖK"), 2), "Not": "İş Yatırım"},
+                {"Gösterge": "FD/Satış", "Değer": fmt_num(deg.get("FD/Satış"), 2), "Not": "İş Yatırım"},
+                {"Gösterge": "ROE %", "Değer": fmt_num(
+                    (deg.get("ROE") if deg.get("ROE") is not None else
+                     (_core_bil.get("oranlar") or {}).get("ROE_%")), 1
+                ), "Not": "Bilanço / oran"},
+            ]
+            st.dataframe(pd.DataFrame(pd_rows), hide_index=True, use_container_width=True)
+
+            # ── 4) Teknik veriler ──
+            st.markdown("##### 4) Teknik veriler")
+            tek_rows = [
+                {"Gösterge": "RSI (14)", "Değer": fmt_num(_tek.get("rsi14"), 1),
+                 "Sinyal": (
+                     "Aşırı satım" if (_tek.get("rsi14") or 50) <= 30 else
+                     ("Aşırı alım" if (_tek.get("rsi14") or 50) >= 70 else "Nötr")
+                 )},
+                {"Gösterge": "MA22", "Değer": fmt_num(_tek.get("ma22"), 2),
+                 "Sinyal": "Fiyat üstü" if last_px and _tek.get("ma22") and last_px > _tek["ma22"] else "Fiyat altı"},
+                {"Gösterge": "MA50", "Değer": fmt_num(_tek.get("ma50"), 2),
+                 "Sinyal": "Fiyat üstü" if last_px and _tek.get("ma50") and last_px > _tek["ma50"] else "Fiyat altı"},
+                {"Gösterge": "MA200", "Değer": fmt_num(_tek.get("ma200"), 2),
+                 "Sinyal": "Fiyat üstü" if last_px and _tek.get("ma200") and last_px > _tek["ma200"] else "Fiyat altı"},
+                {"Gösterge": "Volatilite %", "Değer": fmt_num(m.get("volatilite"), 1), "Sinyal": "—"},
+                {"Gösterge": "Max DD %", "Değer": fmt_num(m.get("max_drawdown"), 1), "Sinyal": "—"},
+                {"Gösterge": "Sharpe", "Değer": fmt_num(m.get("sharpe"), 2), "Sinyal": "—"},
+            ]
+            st.dataframe(pd.DataFrame(tek_rows), hide_index=True, use_container_width=True)
+
+            # ── 5) Temel veri analizi ──
+            st.markdown("##### 5) Temel veri analizi")
+            oz = (_core_bil.get("ozet") if isinstance(_core_bil, dict) else None) or {}
+            oran = (_core_bil.get("oranlar") if isinstance(_core_bil, dict) else None) or {}
+            tem_rows = []
+            for key, lab in [
+                ("hasilat", "Satışlar"),
+                ("brut_kar", "Brüt kâr"),
+                ("esas_faaliyet_kari", "Esas faaliyet kârı"),
+                ("net_donem_kari", "Net dönem kârı"),
+                ("nakit", "Nakit"),
+                ("ozkaynaklar", "Özkaynaklar"),
+                ("toplam_varliklar", "Toplam varlıklar"),
+                ("kisa_vadeli_yukumluluk", "KV yükümlülük"),
+            ]:
+                it = oz.get(key) or {}
+                if isinstance(it, dict) and it.get("deger") is not None:
+                    tem_rows.append({
+                        "Kalem": lab,
+                        "Tutar": _fmt_tl(it.get("deger")),
+                        "YoY %": it.get("degisim_%"),
+                        "Dönem": _core_bil.get("gunce_donem") or "—",
+                    })
+            tem_rows.append({"Kalem": "ROE %", "Tutar": oran.get("ROE_%"), "YoY %": None, "Dönem": _core_bil.get("gunce_donem")})
+            tem_rows.append({"Kalem": "Net marj %", "Tutar": oran.get("net_kar_marji_%"), "YoY %": None, "Dönem": _core_bil.get("gunce_donem")})
+            tem_rows.append({"Kalem": "Cari oran", "Tutar": oran.get("cari_oran"), "YoY %": None, "Dönem": _core_bil.get("gunce_donem")})
+            tem_rows.append({"Kalem": "Borç/özkaynak", "Tutar": oran.get("borc_ozkaynak"), "YoY %": None, "Dönem": _core_bil.get("gunce_donem")})
+            if tem_rows:
+                st.dataframe(pd.DataFrame(tem_rows), hide_index=True, use_container_width=True)
+            else:
+                st.info("Temel veri için İş Yatırım mali tablo gerekli.")
+
+            # ── 6) Skor özeti (renkli kartlar) ──
+            st.markdown("##### 6) Skor özeti")
+            _karne2 = det.get("fintables_karne") or fintables_tarzi_karne(
+                _core_bil if isinstance(_core_bil, dict) else {}, deg, m
+            )
+            s1, s2, s3, s4, s5 = st.columns(5)
+            s1.metric("Karne genel", f"{_karne2.get('genel')}/100", _karne2.get("harf"))
+            s2.metric("Kârlılık", f"{_karne2.get('karlilik')}/100")
+            s3.metric("Büyüme", f"{_karne2.get('buyume')}/100")
+            s4.metric("Borçluluk", f"{_karne2.get('borcluluk')}/100")
+            s5.metric("Değerleme", f"{_karne2.get('degerleme')}/100")
+            s6, s7 = st.columns(2)
+            s6.metric("Temel skor", f"{_tem.get('skor')}/100" if _tem.get("skor") is not None else "—")
+            s7.metric("Model sinyal", f"{(det.get('model_sinyal') or {}).get('skor', '—')}")
+
+            # Excel tüm skor kart tabloları
+            if st.button("Skor Kart Excel indir", key="btn_sk_excel"):
+                try:
+                    from io import BytesIO
+                    bio = BytesIO()
+                    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+                        pd.DataFrame(fy_rows).to_excel(writer, sheet_name="Fiyat_ozeti", index=False)
+                        pd.DataFrame(perf_rows).to_excel(writer, sheet_name="Fiyat_performans", index=False)
+                        pd.DataFrame(pd_rows).to_excel(writer, sheet_name="Piyasa_carpan", index=False)
+                        pd.DataFrame(tek_rows).to_excel(writer, sheet_name="Teknik", index=False)
+                        pd.DataFrame(tem_rows).to_excel(writer, sheet_name="Temel", index=False)
+                        pd.DataFrame([_karne2]).to_excel(writer, sheet_name="Karne", index=False)
+                    st.download_button(
+                        "İndir",
+                        data=bio.getvalue(),
+                        file_name=f"skor_kart_{kod}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_sk_xlsx",
+                    )
+                except Exception as e:
+                    st.warning(str(e))
 
         with tab_g:
             bm = None
@@ -6591,15 +9009,20 @@ elif sayfa == "🔎 Hisse Detay":
                 "Her hisse için API’de **dolu olan en yeni dönem** seçilir (ör. 2026/9 varsa 2026/6 kullanılmaz). "
                 "Cache günlük; «Zorla yenile» ile anında çeker. Gelir kalemleri kümülatif."
             )
-            if st.button("Zorla yenile (İş Yatırım)", key="btn_isy_force"):
-                st.session_state["_isy_force_refresh"] = True
-                # cache temizle
+            if st.button("Güncelle ve raporları yenile (İş Yatırım)", type="primary", key="btn_isy_force"):
+                # Tüm ilgili cache temiz — güncel mali tablo (ör. 2026/9) yeniden çekilir
                 try:
-                    ck = f"{kod}|XI_29"
-                    st.session_state.get("_isy_mali_cache", {}).pop(ck, None)
-                    st.session_state.get("_isy_mali_cache", {}).pop(f"{kod}|UFRS", None)
+                    for ck in (f"{kod}|XI_29", f"{kod}|UFRS"):
+                        st.session_state.get("_isy_mali_cache", {}).pop(ck, None)
+                    st.session_state.get("_isy_carpan_cache", {}).pop(kod, None)
+                    # Hisse detay sonucunu sil → Analiz et ile taze rapor
+                    st.session_state.pop("hisse_detay_sonuc", None)
+                    st.session_state["_isy_force_refresh"] = True
+                    st.session_state["_hisse_auto_analiz"] = True
+                    st.session_state["hisse_kod_input"] = kod
                 except Exception:
                     pass
+                st.success(f"{kod}: cache temizlendi — mali tablo ve raporlar İş Yatırım’dan yenilenecek.")
                 st.rerun()
             if _core_bil.get("error"):
                 st.warning(f"İş Yatırım veri alınamadı: {_core_bil.get('error')}")
@@ -6678,19 +9101,120 @@ elif sayfa == "🔎 Hisse Detay":
                     st.markdown("**Özet kalemler (YoY)**")
                     st.dataframe(pd.DataFrame(oz_rows), hide_index=True, use_container_width=True)
 
-                mt1, mt2 = st.tabs(["Bilanço", "Gelir tablosu"])
+
+                _cols = list(_core_bil.get("col_labels") or [])
+                _gunce = _core_bil.get("gunce_donem") or (_cols[0] if _cols else "—")
+                _yoy_lab = None
+                try:
+                    _y, _p = str(_gunce).split("/")
+                    _yoy_lab = f"{int(_y)-1}/{int(_p)}"
+                except Exception:
+                    _yoy_lab = _cols[1] if len(_cols) > 1 else None
+                st.markdown(
+                    f"**Güncel bilanço dönemi: `{_gunce}`**"
+                    + (f" · YoY karşılaştırma: **`{_yoy_lab}`** (önceki yıl aynı dönem)" if _yoy_lab else "")
+                )
+
+                # Reel satış / kârlılık
+                _reel = reel_satis_karlilik(_core_bil)
+                st.markdown(
+                    f"##### Reel büyüme (nominal YoY − TÜFE %{_reel.get('tufe'):.0f}, {_reel.get('tufe_kaynak')})"
+                )
+                if _reel.get("satirlar"):
+                    _rdf = pd.DataFrame(_reel["satirlar"]).copy()
+                    if "Tutar" in _rdf.columns:
+                        _rdf["Tutar"] = _rdf["Tutar"].map(lambda v: _tl(v) if v is not None else "—")
+                    if "YoY tutar" in _rdf.columns:
+                        _rdf["YoY tutar"] = _rdf["YoY tutar"].map(lambda v: _tl(v) if v is not None else "—")
+                    st.dataframe(_rdf, hide_index=True, use_container_width=True)
+                    st.caption(
+                        "Örnek: satış nominal %+50, TÜFE %40 → reel %+10. "
+                        "TÜFE’yi ⚙️ Ayarlar’dan güncelleyin."
+                    )
+                else:
+                    st.caption("YoY değişim verisi yok — reel hesaplanamadı.")
+
+                mt1, mt2, mt3 = st.tabs(["Bilanço", "Gelir tablosu", "Nakit akım"])
+                _birim = st.radio(
+                    "Tutar birimi",
+                    ["mn (milyon TL)", "mlr (milyar TL)", "tam (ondalıklı)"],
+                    horizontal=True,
+                    key=f"mali_birim_{kod}",
+                    index=0,
+                )
+                _b = "mn" if _birim.startswith("mn") else ("mlr" if _birim.startswith("mlr") else "tam")
+                st.caption(
+                    f"Hücre biçimi · birim **{_b}** · güncel **{_gunce}** vs YoY **{_yoy_lab or '—'}**. "
+                    "Boş dönem **—**."
+                )
+
+                def _show_mali(df0, label):
+                    if df0 is None or getattr(df0, "empty", True):
+                        st.caption(f"{label} satırı yok")
+                        return
+                    # YoY karşılaştırma özeti
+                    yoy_df = mali_yoy_karsilastirma_df(df0, _cols)
+                    if yoy_df is not None and not yoy_df.empty:
+                        st.markdown(f"**{_gunce} vs {_yoy_lab or 'önceki'} (YoY %)**")
+                        yoy_view = yoy_df.copy()
+                        for c in yoy_view.columns:
+                            if c in ("kod", "kalem", "YoY %"):
+                                continue
+                            if _b == "tam":
+                                yoy_view[c] = yoy_view[c].map(
+                                    lambda v: "—" if v is None or (isinstance(v, float) and v != v)
+                                    else f"{float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                                )
+                            else:
+                                yoy_view[c] = yoy_view[c].map(
+                                    lambda v: format_mali_df(
+                                        pd.DataFrame({c: [v]}), birim=_b
+                                    )[c].iloc[0] if v is not None else "—"
+                                )
+                        show_df(yoy_view, list(yoy_view.columns), height=280)
+                    st.markdown(f"**Tüm dönemler**")
+                    if _b == "tam":
+                        fmt = df0.copy()
+                        for c in fmt.columns:
+                            if str(c) in ("kod", "kalem"):
+                                continue
+                            def _tam(v):
+                                if v is None or (isinstance(v, float) and v != v):
+                                    return "—"
+                                try:
+                                    x = float(v)
+                                    if x == 0:
+                                        return "0"
+                                    return f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                                except Exception:
+                                    return "—" if str(v).lower() in ("none", "nan") else str(v)
+                            fmt[c] = fmt[c].map(_tam)
+                        show_df(fmt, list(fmt.columns), height=360)
+                    else:
+                        show_df(format_mali_df(df0, birim=_b), list(df0.columns), height=360)
+                    with st.expander(f"Ham {label}"):
+                        show_df(df0, list(df0.columns), height=200)
+
                 with mt1:
-                    bdf = _core_bil.get("bilanco_df")
-                    if bdf is not None and not getattr(bdf, "empty", True):
-                        show_df(bdf, list(bdf.columns), height=420)
-                    else:
-                        st.caption("Bilanço satırı yok")
+                    _show_mali(_core_bil.get("bilanco_df"), "Bilanço")
                 with mt2:
-                    gdf = _core_bil.get("gelir_df")
-                    if gdf is not None and not getattr(gdf, "empty", True):
-                        show_df(gdf, list(gdf.columns), height=420)
+                    _show_mali(_core_bil.get("gelir_df"), "Gelir")
+                with mt3:
+                    ndf = _core_bil.get("nakit_df")
+                    if ndf is not None and not getattr(ndf, "empty", True):
+                        _show_mali(ndf, "Nakit akım")
                     else:
-                        st.caption("Gelir tablosu satırı yok")
+                        st.info(
+                            "Nakit akım satırı (kod 4…) bu hisse/grup için boş. "
+                            "Bilanço nakit kalemi (1AA) özet KPI’da kullanılabilir."
+                        )
+                        # nakit bilanço satırı yedek
+                        bdf = _core_bil.get("bilanco_df")
+                        if bdf is not None and not getattr(bdf, "empty", True) and "kod" in bdf.columns:
+                            nak = bdf[bdf["kod"].astype(str).str.startswith("1AA")]
+                            if not nak.empty:
+                                st.markdown("**Bilanço nakit kalemleri (yedek)**")
+                                _show_mali(nak, "Nakit (bilanço)")
             else:
                 st.info("İş Yatırım’dan veri gelmedi; Yahoo çarpanları yedek olarak aşağıda.")
 
