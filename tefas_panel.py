@@ -309,8 +309,13 @@ def _kap_finansal_rapor(sess: requests.Session, V, gun: int = 3) -> List[dict]:
         if r.get("Kaynak") == "UYARI" or not r.get("Hisse"):
             continue
         if "finansal rapor" in _fold(r.get("Başlık")):
+            _skip = {"Hisse", "Tarih", "URL", "KAP Index", "Kaynak", "Başlık"}
+            ek = [str(r[c]).strip() for c in r.index if c not in _skip and pd.notna(r[c])
+                  and str(r[c]).strip() not in ("", "nan", "None", "NaT")]
+            ozet = " · ".join(ek[:3])[:120]
             out.append({"kod": str(r["Hisse"]).upper(), "tarih": str(r.get("Tarih") or ""),
-                        "url": r.get("URL") or "", "kap": str(r.get("KAP Index") or ""), "baslik": r.get("Başlık")})
+                        "url": r.get("URL") or "", "kap": str(r.get("KAP Index") or ""),
+                        "baslik": str(r.get("Başlık") or ""), "ozet": ozet})
     return out
 
 
@@ -377,26 +382,279 @@ def guncelle_bilanco(workers: int = 12, evren: Optional[List[str]] = None) -> di
 
     # KAP bildirimleri (bilgi amaçlı; İş Yatırım henüz yansıtmamış olabilir)
     for k in kap:
-        if any(e.get("kap") == k["kap"] and k["kap"] for e in yeni):
+        nitelik = " · ".join(x for x in (k.get("baslik"), k.get("ozet")) if x)
+        mevcut_kap = next((e for e in yeni if e.get("kap") == k["kap"] and k["kap"]), None)
+        if mevcut_kap:
+            mevcut_kap["kap_nitelik"] = nitelik or mevcut_kap.get("kap_nitelik") or ""
             continue
         var = next((e for e in yeni if e["kod"] == k["kod"] and _gun_farki(e.get("tespit")) <= 10), None)
         if var:
-            var.update(kap=k["kap"], url=k["url"])
+            var.update(kap=k["kap"], url=k["url"], kap_nitelik=nitelik)
             continue
         yeni.append({"kod": k["kod"], "donem": "", "onceki": durum.get(k["kod"], {}).get("son"), "tespit": simdi,
-                     "kaynak": "KAP", "url": k["url"], "kap": k["kap"], "kap_tarih": k["tarih"]})
+                     "kaynak": "KAP", "url": k["url"], "kap": k["kap"], "kap_tarih": k["tarih"],
+                     "kap_nitelik": nitelik})
 
     esik = (now() - timedelta(days=45)).strftime("%Y-%m-%d")
     yeni = sorted([e for e in yeni if (e.get("tespit") or "")[:10] >= esik], key=lambda e: e.get("tespit") or "", reverse=True)
+    try:
+        _eksik_yas = [_gun_farki(e.get("tespit")) for e in yeni if not e.get("kap")]
+        if _eksik_yas:
+            _kap_geri_esle(sess, V, yeni, int(min(45, max(3, max(_eksik_yas) + 1))))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _notlari_tamamla(sess, V, yeni, durum, donem)
+    except Exception:  # noqa: BLE001  (not üretilemese de bilanço yoklaması başarısız sayılmaz)
+        pass
     obj = {"guncelleme": _iso(), "aranan_donem": donem, "pencere": pencere_icinde, "yoklanan": len(aday),
            "yeni_bulunan": 0 if ilk else len(bulunan), "ilk_kurulum": ilk, "durum": durum, "yeni": yeni}
     save("bilanco", obj)
     return obj
 
 
+def _kap_geri_esle(sess: requests.Session, V, yeni: List[dict], gun: int) -> int:
+    """KAP bağlantısı olmayan kayıtlar (ör. İş Yatırım'dan tespit edilmiş) için son `gun` günün KAP
+    'Finansal Rapor' bildirimlerinde eşleşme arar; bulursa KAP linkini ve bildirim niteliğini yazar."""
+    eksik = [e for e in yeni if not e.get("kap")]
+    if not eksik:
+        return 0
+    by: Dict[str, dict] = {}
+    for k in _kap_finansal_rapor(sess, V, gun):
+        by.setdefault(k["kod"], k)
+    n = 0
+    for e in eksik:
+        k = by.get(e["kod"])
+        if not k:
+            continue
+        e.update(kap=k["kap"], kap_tarih=k["tarih"],
+                 kap_nitelik=" · ".join(x for x in (k.get("baslik"), k.get("ozet")) if x))
+        if not e.get("url"):
+            e["url"] = k["url"]
+        if "KAP" not in (e.get("kaynak") or ""):
+            e["kaynak"] = (e.get("kaynak") or "") + " + KAP"
+        n += 1
+    return n
+
+
+def kap_eslestir(gun: int = 45) -> dict:
+    """Arayüz düğmesi: KAP bağlantısı eksik kayıtları yeniden eşleştirir."""
+    if not _RUN_LOCK.acquire(blocking=False):
+        return {"hata": "Güncelleme zaten çalışıyor."}
+    try:
+        bil = load("bilanco")
+        yeni = bil.get("yeni") or []
+        n = _kap_geri_esle(requests.Session(), _vbist(), yeni, gun)
+        save("bilanco", bil)
+        return {"eslesen": n, "kalan": sum(1 for e in yeni if not e.get("kap"))}
+    finally:
+        _RUN_LOCK.release()
+
+
 def _gun_farki(iso: Optional[str]) -> float:
     d = _parse(iso)
     return 999.0 if not d else (now() - d).total_seconds() / 86400
+
+
+# ── Bilanço değerlendirme notu ──────────────────────────────────────────────
+_NOT_KODLARI = {
+    "sat": ("3C", "3A", "3AA"),      # hasılat
+    "faal": ("3DF", "3H", "3E"),     # esas faaliyet kârı
+    "net": ("3L", "3J", "3I"),       # net dönem kârı
+}
+
+
+def _tr(x: float, d: int = 0) -> str:
+    s = f"{abs(x):,.{d}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return ("-" if x < 0 else "") + s
+
+
+def _yoy_txt(g: float) -> str:
+    return f"{'+' if g > 0 else ('-' if g < 0 else '')}%{_tr(abs(g), 0)}"
+
+
+def _mali_kalemler(sess: requests.Session, V, code: str, y: int, p: int, gruplar) -> Optional[dict]:
+    """(güncel, geçen yıl aynı dönem) çiftleri: satış / faaliyet kârı / net kâr."""
+    qs = [(y, p), (y - 1, p), _prev_q(y, p), _prev_q(y - 1, p)]
+    for g in gruplar:
+        if not g:
+            continue
+        url = V.FIN_URL_TMPL.replace("financialGroup=XI_29", f"financialGroup={g}").format(
+            code=code, y1=qs[0][0], p1=qs[0][1], y2=qs[1][0], p2=qs[1][1],
+            y3=qs[2][0], p3=qs[2][1], y4=qs[3][0], p4=qs[3][1])
+        r = sess.get(url, headers=V.HEAD, timeout=30)
+        r.raise_for_status()
+        by = {str(it.get("itemCode") or ""): it for it in (r.json().get("value") or [])}
+        out: dict = {}
+        for key, kodlar in _NOT_KODLARI.items():
+            for c in kodlar:
+                it = by.get(c)
+                if not it:
+                    continue
+                a, b = V.num(it.get("value1")), V.num(it.get("value2"))
+                if pd.notna(a):
+                    out[key] = (float(a), None if pd.isna(b) else float(b))
+                    break
+        if "sat" in out or "net" in out:
+            out["grup"] = g
+            return out
+    return None
+
+
+def _buyume(cur: Optional[float], prev: Optional[float]) -> Tuple[Optional[float], str]:
+    """(% değişim, durum). durum: kara | zarara | zarar_azaldi | zarar_buyudu | ''"""
+    if cur is None or prev is None:
+        return None, ""
+    if prev > 0:
+        return ((cur / prev - 1) * 100, "zarara" if cur < 0 else "")
+    if prev < 0:
+        if cur > 0:
+            return None, "kara"
+        return None, "zarar_azaldi" if cur > prev else "zarar_buyudu"
+    return None, ""
+
+
+def _gui_otomatik_yorum_ekle(kod: str, donem: str = "") -> str:
+    """tefas_gui mali_tablo_otomatik_yorum varsa kısa özet ekler."""
+    try:
+        import sys
+        gui = sys.modules.get("tefas_gui") or sys.modules.get("__main__")
+        if gui is None or not hasattr(gui, "mali_tablo_otomatik_yorum"):
+            return ""
+        isy = {}
+        if hasattr(gui, "isyatirim_mali_tablo"):
+            isy = gui.isyatirim_mali_tablo(kod, force=False) or {}
+        deg = {}
+        if hasattr(gui, "deg_from_isyatirim"):
+            try:
+                deg = gui.deg_from_isyatirim(kod) or {}
+                if deg.get("_error"):
+                    deg = {}
+            except Exception:
+                deg = {}
+        y = gui.mali_tablo_otomatik_yorum(isy if isinstance(isy, dict) else {}, deg)
+        bits = []
+        if y.get("sonuc"):
+            bits.append(str(y["sonuc"]).replace("**", "")[:90])
+        if y.get("olumlu"):
+            bits.append("+" + str(y["olumlu"][0]).replace("**", "")[:40])
+        if y.get("olumsuz"):
+            bits.append("−" + str(y["olumsuz"][0]).replace("**", "")[:40])
+        return " · ".join(bits)[:160]
+    except Exception:
+        return ""
+
+
+def _not_uret(k: dict) -> Tuple[str, Optional[int]]:
+    """Kural tabanlı kısa değerlendirme + isteğe bağlı gui otomatik yorum. Yatırım tavsiyesi değildir."""
+    parca, puan = [], 0
+    sat, faal, net = k.get("sat"), k.get("faal"), k.get("net")
+
+    if sat:
+        g, _ = _buyume(*sat)
+        if g is not None:
+            parca.append(f"Satış {_yoy_txt(g)}")
+            puan += 1 if g >= 10 else (-1 if g < 0 else 0)
+    if faal:
+        g, d = _buyume(*faal)
+        if g is not None:
+            parca.append(f"Faaliyet {_yoy_txt(g)}")
+            puan += 1 if g >= 10 else (-1 if g < 0 else 0)
+        elif d == "kara":
+            parca.append("Faaliyet zarardan kâra"); puan += 1
+        elif d == "zarar_buyudu":
+            parca.append("Faaliyet zararı büyüdü"); puan -= 1
+    if net:
+        g, d = _buyume(*net)
+        if g is not None and d != "zarara":
+            parca.append(f"Net kâr {_yoy_txt(g)}")
+            puan += 2 if g >= 20 else (1 if g >= 0 else -1)
+        elif d == "kara":
+            parca.append("Net kâr zarardan kâra"); puan += 2
+        elif d == "zarara":
+            parca.append("Net kâr zarara döndü"); puan -= 2
+        elif d == "zarar_azaldi":
+            parca.append("Net zarar azaldı")
+        elif d == "zarar_buyudu":
+            parca.append("Net zarar büyüdü"); puan -= 2
+    if sat and net and sat[0]:
+        m0 = net[0] / sat[0] * 100
+        txt = f"Net marj %{_tr(m0, 1)}"
+        if sat[1] and net[1] is not None:
+            m1 = net[1] / sat[1] * 100
+            if m0 - m1 >= 0.5:
+                txt += " ↑"; puan += 1
+            elif m0 - m1 <= -0.5:
+                txt += " ↓"; puan -= 1
+        parca.append(txt)
+
+    if not parca:
+        ekstra = _gui_otomatik_yorum_ekle(str(k.get("kod") or ""), str(k.get("donem") or ""))
+        if ekstra:
+            return f"🟡 Karışık · {ekstra}", 0
+        return "Kalem verisi okunamadı", None
+    etiket = "🟢 Güçlü" if puan >= 3 else ("🟡 Karışık" if puan >= 0 else "🔴 Zayıf")
+    base = f"{etiket} · " + " · ".join(parca)
+    ekstra = _gui_otomatik_yorum_ekle(str(k.get("kod") or ""), str(k.get("donem") or ""))
+    if ekstra and ekstra not in base:
+        base = (base + " · " + ekstra)[:280]
+    return base, puan
+
+
+def _notlari_tamamla(sess: requests.Session, V, yeni: List[dict], durum: Dict[str, dict],
+                     aranan_donem: str, workers: int = 8, yenile: bool = False) -> int:
+    """Yeni bilanço kayıtlarına 'not' (değerlendirme notu) yazar. Dönemi henüz bilinmeyen (yalnız KAP) kayıtlar
+    için aranan dönem İş Yatırım'da denenir; veri yoksa kayıt 'bekliyor' kalır ve sonraki yenilemede tekrar denenir."""
+    adaylar = [e for e in yeni if yenile or not e.get("not") or e.get("not_bekliyor")]
+
+    def work(e):
+        kod = e["kod"]
+        d = e.get("donem") or aranan_donem or ""
+        m = re.fullmatch(r"(\d{4})/(\d{1,2})", d)
+        if not m:
+            return e, None, False
+        y, p = int(m.group(1)), int(m.group(2))
+        gr = (durum.get(kod) or {}).get("grup")
+        gruplar = ((gr,) if gr else ()) + tuple(g for g in ("XI_29", "UFRS_K", "UFRS") if g != gr)
+        try:
+            return e, _mali_kalemler(sess, V, kod, y, p, gruplar), False
+        except Exception:  # noqa: BLE001
+            return e, None, True
+
+    n = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for f in as_completed([ex.submit(work, e) for e in adaylar]):
+            e, k, hata = f.result()
+            if hata:
+                continue
+            kap_only = not e.get("donem")
+            if k is None:
+                if kap_only:
+                    e["not"], e["not_bekliyor"] = "⏳ İş Yatırım'da rakamlar henüz yok (KAP bildirimi alındı)", True
+                else:
+                    e["not"], e["not_bekliyor"] = "Kalem verisi okunamadı", False
+            else:
+                txt, puan = _not_uret(k)
+                e["not"] = (f"({aranan_donem}) " if kap_only else "") + txt
+                e["not_puan"], e["not_bekliyor"] = puan, False
+            n += 1
+    return n
+
+
+def notlari_guncelle(yenile: bool = False) -> dict:
+    """Arayüzdeki 'notları hesapla' düğmesi: tam yoklama yapmadan yalnız değerlendirme notlarını doldurur."""
+    if not _RUN_LOCK.acquire(blocking=False):
+        return {"hata": "Güncelleme zaten çalışıyor."}
+    try:
+        bil = load("bilanco")
+        if not (bil.get("yeni") or []):
+            return {"guncellenen": 0}
+        n = _notlari_tamamla(requests.Session(), _vbist(), bil["yeni"], bil.get("durum") or {},
+                             bil.get("aranan_donem") or "", yenile=yenile)
+        save("bilanco", bil)
+        return {"guncellenen": n}
+    finally:
+        _RUN_LOCK.release()
 
 
 # ── Değerleme yenileme ──────────────────────────────────────────────────────
@@ -507,6 +765,39 @@ def _liste(kayitlar: List[dict], anahtar: str, n: int, yukari: bool, min_ciro: f
     return df
 
 
+_PN_CSS = """<style>
+.pn-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin:4px 0 10px}
+.pn-card{container-type:inline-size;overflow:hidden;min-width:0;background:linear-gradient(160deg,#1e293bcc,#0f172acc);border:1px solid #334155;border-radius:10px;padding:8px 12px}
+.pn-l{color:#94a3b8;white-space:nowrap}
+.pn-v{font-weight:700;color:#f1f5f9;line-height:1.15;white-space:nowrap;margin:2px 0 4px}
+.pn-d{display:inline-block;font-weight:600;padding:1px 8px;border-radius:999px;white-space:nowrap;max-width:100%}
+.pn-up{background:#0f3d32;color:#3ddc97}.pn-dn{background:#3d1a1a;color:#ff6b6b}.pn-nt{background:#1e293b;color:#94a3b8}
+</style>"""
+
+
+def _fit(metin: str, max_rem: float, char_w: float = 0.6) -> str:
+    """Kart genişliğine göre yazıyı küçültür (container query); desteklemeyen tarayıcıda max boyut."""
+    kk = 100.0 / (char_w * max(len(str(metin)), 1))
+    return f"font-size:{max_rem}rem;font-size:min({max_rem}rem,{kk:.1f}cqw)"
+
+
+def _kpi_html(kartlar: List[Tuple[str, str, str, str]]) -> str:
+    """kartlar: (etiket, değer, alt metin, ton[up|dn|nt])"""
+    parca = []
+    for et, val, alt, ton in kartlar:
+        d = (f'<span class="pn-d pn-{ton}" style="{_fit(alt, 0.7, 0.62)}">{alt}</span>' if alt else "")
+        parca.append(f'<div class="pn-card"><div class="pn-l" style="{_fit(et, 0.72, 0.55)}">{et}</div>'
+                     f'<div class="pn-v" style="{_fit(val, 1.35, 0.62)}">{val}</div>{d}</div>')
+    return '<div class="pn-grid">' + "".join(parca) + "</div>"
+
+
+def _ton(v) -> str:
+    try:
+        return "up" if float(v) > 0 else ("dn" if float(v) < 0 else "nt")
+    except (TypeError, ValueError):
+        return "nt"
+
+
 def render_ana_panel(*, key: str = "panel") -> None:
     """Ön sayfa paneli. Hata olursa ana sayfayı bozmaz."""
     import streamlit as st
@@ -582,14 +873,17 @@ def _render(st, key: str) -> None:
     hk = pd.DataFrame(his.get("kayitlar") or [])
     fk = pd.DataFrame(fon.get("kayitlar") or [])
     bek = bekleyen_degerleme() if bil else []
-    c1, c2, c3, c4 = st.columns(4)
+    kartlar = []
     if not hk.empty:
-        c1.metric("BIST yükselen / düşen", f"{int((hk['g1'] > 0).sum())} / {int((hk['g1'] < 0).sum())}",
-                  f"ort. %{hk['g1'].mean():+.2f}")
+        ort = hk["g1"].mean()
+        kartlar.append(("BIST yükselen / düşen", f"{int((hk['g1'] > 0).sum())} / {int((hk['g1'] < 0).sum())}",
+                        f"ort. %{ort:+.2f}", _ton(ort)))
     if not fk.empty:
-        c2.metric("Fon medyan günlük", f"%{fk['g1'].median():+.2f}", f"{int((fk['g1'] > 0).sum())} fon yükseldi")
-    c3.metric("Yeni bilanço (45 gün)", len(bil.get("yeni") or []))
-    c4.metric("Değerlemesi bekleyen", len(bek))
+        med = fk["g1"].median()
+        kartlar.append(("Fon medyan günlük", f"%{med:+.2f}", f"{int((fk['g1'] > 0).sum())} fon yükseldi", _ton(med)))
+    kartlar.append(("Yeni bilanço (45 gün)", str(len(bil.get("yeni") or [])), "", "nt"))
+    kartlar.append(("Değerlemesi bekleyen", str(len(bek)), "", "nt"))
+    st.markdown(_PN_CSS + _kpi_html(kartlar), unsafe_allow_html=True)
 
     t_bil, t_his, t_fon = st.tabs(["🆕 Yeni bilançolar", "📈 Hisseler", "💰 Fonlar"])
 
@@ -602,27 +896,81 @@ def _render(st, key: str) -> None:
             st.write("Son 45 günde tespit edilen yeni bilanço yok."
                      + (f" (Aranan dönem: {bil.get('aranan_donem')}, yoklanan hisse: {bil.get('yoklanan')})" if bil else ""))
         else:
-            rap = {}
-            try:
-                import tefas_bist as B
-                rl = B.list_reports()
-                if rl:
-                    rap = st.cache_data(show_spinner=False)(_rapor_ozet)(str(rl[0]), rl[0].stat().st_mtime)
-            except Exception:  # noqa: BLE001
-                rap = {}
+            gunler = sorted({(e.get("tespit") or "")[:10] for e in yeni if e.get("tespit")}, reverse=True)
+            sayi = {g: sum(1 for e in yeni if (e.get("tespit") or "")[:10] == g) for g in gunler}
+            sec = st.selectbox("Tarih", ["Tümü"] + gunler, key=f"{key}_btarih",
+                               format_func=lambda g: g if g == "Tümü" else f"{g} ({sayi[g]})")
+            gor = [e for e in yeni if sec == "Tümü" or (e.get("tespit") or "")[:10] == sec]
             rows = []
             rz = son_rapor_zamani()
-            for e in yeni:
-                r = rap.get(e["kod"], {})
+            for e in gor:
                 bekler = (rz is None) or ((_parse(e.get("tespit")) or rz) > rz)
                 rows.append({"Hisse": e["kod"], "Dönem": e.get("donem") or "—", "Tespit": e.get("tespit"),
-                             "Kaynak": e.get("kaynak"), "Değerleme": "⏳ yenilenmeli" if bekler else "✅ güncel",
-                             "Final Score": r.get("Final Score"), "Adil Değer Marjı %": r.get("adil"),
-                             "Kova": r.get("Kova"), "KAP": e.get("url") or ""})
+                             "Kaynak": e.get("kaynak"), "KAP bildirimi": e.get("kap_nitelik") or ("KAP'ta eşleşmedi" if not e.get("kap") else "—"),
+                             "Değerleme": "⏳ yenilenmeli" if bekler else "✅ güncel",
+                             "Değerlendirme notu": e.get("not") or "—", "KAP": e.get("url") or ""})
             df = pd.DataFrame(rows)
-            st.dataframe(df, hide_index=True, use_container_width=True,
-                         column_config={"KAP": st.column_config.LinkColumn("KAP", display_text="aç")}
-                         if hasattr(st, "column_config") else None)
+            cfg = None
+            if hasattr(st, "column_config"):
+                C = st.column_config
+                cfg = {"Hisse": C.TextColumn(width="small"), "Dönem": C.TextColumn(width="small"),
+                       "Tespit": C.TextColumn(width="small"), "Kaynak": C.TextColumn(width="small"),
+                       "KAP bildirimi": C.TextColumn(width="medium"),
+                       "Değerleme": C.TextColumn(width="small"),
+                       "Değerlendirme notu": C.TextColumn(width="large"),
+                       "KAP": C.LinkColumn("KAP", display_text="aç", width="small")}
+            st.dataframe(df, hide_index=True, use_container_width=True, column_config=cfg,
+                         height=min(38 + 35 * max(len(df), 1) + 3, 20000))
+            kap_eksik = sum(1 for e in yeni if not e.get("kap"))
+            if kap_eksik:
+                q1, q2 = st.columns([2, 3])
+                if q1.button("🔗 KAP bildirimlerini eşleştir", key=f"{key}_kapes", disabled=_STATE["running"],
+                             help="KAP bağlantısı olmayan kayıtlar için son 45 günün KAP 'Finansal Rapor' bildirimlerine bakar."):
+                    with st.spinner("KAP bildirimleri aranıyor…"):
+                        sonuc = kap_eslestir()
+                    if sonuc.get("hata"):
+                        st.warning(sonuc["hata"])
+                    else:
+                        st.session_state[f"{key}_kapmsg"] = (f"{sonuc['eslesen']} kayıt eşleşti, "
+                                                             f"{sonuc['kalan']} kayıt için KAP bildirimi bulunamadı.")
+                        st.rerun()
+                q2.caption(st.session_state.pop(f"{key}_kapmsg", None) or f"{kap_eksik} kayıtta KAP bağlantısı yok.")
+            eksik = sum(1 for e in yeni if not e.get("not") or e.get("not_bekliyor"))
+            if eksik:
+                n1, n2 = st.columns([2, 3])
+                if n1.button("📝 Değerlendirme notlarını hesapla", key=f"{key}_notlar", disabled=_STATE["running"],
+                             help="İş Yatırım mali tablosundan satış / faaliyet / net kâr YoY ve net marj okunur."):
+                    with st.spinner("Bilanço notları hesaplanıyor…"):
+                        sonuc = notlari_guncelle()
+                    if sonuc.get("hata"):
+                        st.warning(sonuc["hata"])
+                    else:
+                        st.rerun()
+                n2.caption(f"{eksik} kayıtta not yok / veri bekleniyor.")
+                if st.button("🤖 Otomatik yorum zenginleştir (gui)", key=f"{key}_auto_y",
+                             help="tefas_gui mali_tablo_otomatik_yorum ile notları genişletir."):
+                    with st.spinner("Otomatik yorum…"):
+                        bil2 = load("bilanco")
+                        yeni2 = bil2.get("yeni") or []
+                        n_upd = 0
+                        for e in yeni2:
+                            kod = e.get("kod")
+                            if not kod:
+                                continue
+                            ekstra = _gui_otomatik_yorum_ekle(kod, e.get("donem") or "")
+                            if not ekstra:
+                                continue
+                            oldn = e.get("not") or ""
+                            if ekstra in oldn:
+                                continue
+                            e["not"] = ((oldn + " · " if oldn and oldn != "—" else "") + ekstra)[:320]
+                            e["not_bekliyor"] = False
+                            n_upd += 1
+                        bil2["yeni"] = yeni2
+                        save("bilanco", bil2)
+                        st.success(f"{n_upd} kayıtta yorum güncellendi.")
+                        st.rerun()
+            st.caption("Not = kural tabanlı özet (satış / faaliyet / net kâr YoY + marj) + isteğe bağlı gui otomatik yorum. Yatırım tavsiyesi değildir.")
         a1, a2 = st.columns([2, 3])
         if a1.button("♻️ Yeni bilançoları değerlemeye yansıt", key=f"{key}_deger", disabled=not bek,
                      help="BIST değerleme motorunu yeniden çalıştırır (tüm evreni baştan hesaplar; uzun sürer)."):
@@ -650,7 +998,7 @@ def _render(st, key: str) -> None:
             per = p.radio("Dönem", ["Günlük", "Haftalık", "Aylık"], horizontal=True, key=f"{key}_hp")
             ciro = m.number_input("Min. ort. günlük ciro (milyon TL)", 0.0, 10000.0, 5.0, 1.0, key=f"{key}_hciro",
                                   help="Düşük hacimli hisselerin gürültüsünü ele (son 20 gün ort. fiyat×hacim).")
-            nn = n.number_input("Kaç satır", 5, 30, 10, key=f"{key}_hn")
+            nn = n.number_input("Kaç satır", 5, 40, 20, key=f"{key}_hn")
             ak = {"Günlük": "g1", "Haftalık": "h1", "Aylık": "a1"}[per]
             yenikodlar = {e["kod"] for e in (bil.get("yeni") or [])}
             ca, cb = st.columns(2)
@@ -676,7 +1024,7 @@ def _render(st, key: str) -> None:
             per = p.radio("Dönem", ["Günlük", "Haftalık", "Aylık"], horizontal=True, key=f"{key}_fp")
             gizle = m.checkbox("Aykırı değerleri gizle", value=True, key=f"{key}_fcap",
                                help="Günlük ±25%, haftalık ±50%, aylık ±100% dışı (çoğunlukla veri hatası/ilk fiyat).")
-            nn = n.number_input("Kaç satır", 5, 30, 10, key=f"{key}_fn")
+            nn = n.number_input("Kaç satır", 5, 40, 20, key=f"{key}_fn")
             ak = {"Günlük": "g1", "Haftalık": "h1", "Aylık": "a1"}[per]
             capv = {"g1": 25.0, "h1": 50.0, "a1": 100.0}[ak] if gizle else 0.0
             ca, cb = st.columns(2)
@@ -692,23 +1040,3 @@ def _render(st, key: str) -> None:
                     st.dataframe(_renkle(v, "Değişim %"), hide_index=True, use_container_width=True)
             st.caption(f"{fon.get('taranan', '?')} fon tarandı; fon fiyatları genellikle ertesi sabah netleşir. "
                        "Yatırım tavsiyesi değildir.")
-
-
-def _rapor_ozet(path: str, mtime: float) -> Dict[str, dict]:
-    """Son BIST raporundan hisse → skor özeti (Yeni bilançolar tablosunu zenginleştirir)."""
-    try:
-        import tefas_bist as B
-        xl = pd.ExcelFile(path)
-        sh = "Değerleme Özeti" if "Değerleme Özeti" in xl.sheet_names else ("Ana Sıralama" if "Ana Sıralama" in xl.sheet_names else None)
-        if not sh:
-            return {}
-        df = xl.parse(sh)
-        out = {}
-        for _, x in df.iterrows():
-            k = str(x.get("Hisse", "")).upper()
-            adil = x.get("Adil Değer Marjı")
-            out[k] = {"Final Score": x.get("Final Score"), "Kova": x.get("Kova"),
-                      "adil": None if pd.isna(adil) else round(float(adil) * 100, 1)}
-        return out
-    except Exception:  # noqa: BLE001
-        return {}
