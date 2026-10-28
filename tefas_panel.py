@@ -546,66 +546,116 @@ def _gui_otomatik_yorum_ekle(kod: str, donem: str = "") -> str:
 
 
 def _not_uret(k: dict) -> Tuple[str, Optional[int]]:
-    """Kural tabanlı kısa değerlendirme + isteğe bağlı gui otomatik yorum. Yatırım tavsiyesi değildir."""
+    """
+    Yeni bilanço final skor (0–100) + kurumsal not.
+    Satış/faaliyet/net kâr YoY + marj + isteğe bağlı gui paket.
+    Dönüş: (not_metni, puan_ham) — puan_ham geriye uyumluluk; final skor not içinde.
+    """
     parca, puan = [], 0
     sat, faal, net = k.get("sat"), k.get("faal"), k.get("net")
+    kod = str(k.get("kod") or "")
+    donem = str(k.get("donem") or "")
 
     if sat:
         g, _ = _buyume(*sat)
         if g is not None:
             parca.append(f"Satış {_yoy_txt(g)}")
-            puan += 1 if g >= 10 else (-1 if g < 0 else 0)
+            puan += 2 if g >= 20 else (1 if g >= 10 else (-1 if g < 0 else 0))
     if faal:
         g, d = _buyume(*faal)
         if g is not None:
             parca.append(f"Faaliyet {_yoy_txt(g)}")
-            puan += 1 if g >= 10 else (-1 if g < 0 else 0)
+            puan += 2 if g >= 20 else (1 if g >= 10 else (-1 if g < 0 else 0))
         elif d == "kara":
-            parca.append("Faaliyet zarardan kâra"); puan += 1
+            parca.append("Faaliyet zarardan kâra"); puan += 2
         elif d == "zarar_buyudu":
-            parca.append("Faaliyet zararı büyüdü"); puan -= 1
+            parca.append("Faaliyet zararı büyüdü"); puan -= 2
     if net:
         g, d = _buyume(*net)
         if g is not None and d != "zarara":
             parca.append(f"Net kâr {_yoy_txt(g)}")
-            puan += 2 if g >= 20 else (1 if g >= 0 else -1)
+            puan += 3 if g >= 25 else (2 if g >= 10 else (1 if g >= 0 else -2))
         elif d == "kara":
-            parca.append("Net kâr zarardan kâra"); puan += 2
+            parca.append("Net kâr zarardan kâra"); puan += 3
         elif d == "zarara":
-            parca.append("Net kâr zarara döndü"); puan -= 2
+            parca.append("Net kâr zarara döndü"); puan -= 3
         elif d == "zarar_azaldi":
-            parca.append("Net zarar azaldı")
+            parca.append("Net zarar azaldı"); puan += 1
         elif d == "zarar_buyudu":
-            parca.append("Net zarar büyüdü"); puan -= 2
+            parca.append("Net zarar büyüdü"); puan -= 3
+    marj0 = None
     if sat and net and sat[0]:
-        m0 = net[0] / sat[0] * 100
-        txt = f"Net marj %{_tr(m0, 1)}"
+        marj0 = net[0] / sat[0] * 100
+        txt = f"Net marj %{_tr(marj0, 1)}"
         if sat[1] and net[1] is not None:
             m1 = net[1] / sat[1] * 100
-            if m0 - m1 >= 0.5:
+            if marj0 - m1 >= 0.5:
                 txt += " ↑"; puan += 1
-            elif m0 - m1 <= -0.5:
+            elif marj0 - m1 <= -0.5:
                 txt += " ↓"; puan -= 1
         parca.append(txt)
+        if marj0 >= 12:
+            puan += 1
+        elif marj0 is not None and marj0 < 3:
+            puan -= 1
 
-    if not parca:
-        ekstra = _gui_otomatik_yorum_ekle(str(k.get("kod") or ""), str(k.get("donem") or ""))
+    # 0–100 final skor (ham puan -6..+12 → ölçek)
+    final = int(max(0, min(100, round(55 + puan * 6))))
+
+    # Gui paket: kalite / sinyal ile harman
+    gui_bits = []
+    try:
+        import sys
+        gui = sys.modules.get("tefas_gui") or sys.modules.get("__main__")
+        if gui and hasattr(gui, "_hisse_paket"):
+            pack = gui._hisse_paket(kod, force=False)
+            if isinstance(pack, dict):
+                kal = (pack.get("kalite") or {}).get("skor")
+                sig = (pack.get("yorum") or {})
+                if kal is not None:
+                    try:
+                        final = int(round(0.55 * final + 0.45 * float(kal)))
+                        gui_bits.append(f"kalite {float(kal):.0f}")
+                    except (TypeError, ValueError):
+                        pass
+                if sig.get("sonuc"):
+                    gui_bits.append(str(sig["sonuc"]).replace("**", "")[:70])
+        ekstra = _gui_otomatik_yorum_ekle(kod, donem)
         if ekstra:
-            return f"🟡 Karışık · {ekstra}", 0
-        return "Kalem verisi okunamadı", None
-    etiket = "🟢 Güçlü" if puan >= 3 else ("🟡 Karışık" if puan >= 0 else "🔴 Zayıf")
-    base = f"{etiket} · " + " · ".join(parca)
-    ekstra = _gui_otomatik_yorum_ekle(str(k.get("kod") or ""), str(k.get("donem") or ""))
-    if ekstra and ekstra not in base:
-        base = (base + " · " + ekstra)[:280]
-    return base, puan
+            gui_bits.append(ekstra[:80])
+    except Exception:
+        pass
+
+    if final >= 75:
+        etiket = "🟢 Güçlü"
+    elif final >= 60:
+        etiket = "🟡 İyi"
+    elif final >= 45:
+        etiket = "🟠 Karışık"
+    else:
+        etiket = "🔴 Zayıf"
+
+    # Kurumsal not metni
+    ozet = " · ".join(parca) if parca else "Kalem verisi sınırlı"
+    if gui_bits:
+        ozet = ozet + " · " + " · ".join(gui_bits[:2])
+    not_metni = (
+        f"{etiket} · Final skor {final}/100"
+        f" · bileşen satış/faaliyet/net/marj"
+        f" · {ozet}"
+    )
+
+    k["_final_skor"] = final
+    k["_etiket"] = etiket
+    return not_metni[:320], puan
+
 
 
 def _notlari_tamamla(sess: requests.Session, V, yeni: List[dict], durum: Dict[str, dict],
                      aranan_donem: str, workers: int = 8, yenile: bool = False) -> int:
     """Yeni bilanço kayıtlarına 'not' (değerlendirme notu) yazar. Dönemi henüz bilinmeyen (yalnız KAP) kayıtlar
     için aranan dönem İş Yatırım'da denenir; veri yoksa kayıt 'bekliyor' kalır ve sonraki yenilemede tekrar denenir."""
-    adaylar = [e for e in yeni if yenile or not e.get("not") or e.get("not_bekliyor")]
+    adaylar = [e for e in yeni if yenile or not e.get("not") or e.get("not_bekliyor") or e.get("final_skor") is None]
 
     def work(e):
         kod = e["kod"]
@@ -637,6 +687,8 @@ def _notlari_tamamla(sess: requests.Session, V, yeni: List[dict], durum: Dict[st
                 txt, puan = _not_uret(k)
                 e["not"] = (f"({aranan_donem}) " if kap_only else "") + txt
                 e["not_puan"], e["not_bekliyor"] = puan, False
+                e["final_skor"] = k.get("_final_skor")
+                e["etiket"] = k.get("_etiket")
             n += 1
     return n
 
@@ -905,22 +957,73 @@ def _render(st, key: str) -> None:
             rz = son_rapor_zamani()
             for e in gor:
                 bekler = (rz is None) or ((_parse(e.get("tespit")) or rz) > rz)
-                rows.append({"Hisse": e["kod"], "Dönem": e.get("donem") or "—", "Tespit": e.get("tespit"),
-                             "Kaynak": e.get("kaynak"), "KAP bildirimi": e.get("kap_nitelik") or ("KAP'ta eşleşmedi" if not e.get("kap") else "—"),
-                             "Değerleme": "⏳ yenilenmeli" if bekler else "✅ güncel",
-                             "Değerlendirme notu": e.get("not") or "—", "KAP": e.get("url") or ""})
+                # Final skor nottan veya alandan
+                fs = e.get("final_skor")
+                if fs is None and e.get("not"):
+                    import re as _re
+                    mm = _re.search(r"Final(?:\s+skor)?\s+(\d+)/100", str(e.get("not")))
+                    if mm:
+                        fs = int(mm.group(1))
+                rows.append({
+                    "Hisse": e["kod"],
+                    "Dönem": e.get("donem") or "—",
+                    "Final skor": fs if fs is not None else "—",
+                    "Tespit": e.get("tespit"),
+                    "Kaynak": e.get("kaynak"),
+                    "KAP bildirimi": e.get("kap_nitelik") or ("KAP'ta eşleşmedi" if not e.get("kap") else "—"),
+                    "Değerleme": "⏳ yenilenmeli" if bekler else "✅ güncel",
+                    "Final not": e.get("not") or "—",
+                    "KAP": e.get("url") or "",
+                })
             df = pd.DataFrame(rows)
             cfg = None
             if hasattr(st, "column_config"):
                 C = st.column_config
-                cfg = {"Hisse": C.TextColumn(width="small"), "Dönem": C.TextColumn(width="small"),
-                       "Tespit": C.TextColumn(width="small"), "Kaynak": C.TextColumn(width="small"),
-                       "KAP bildirimi": C.TextColumn(width="medium"),
-                       "Değerleme": C.TextColumn(width="small"),
-                       "Değerlendirme notu": C.TextColumn(width="large"),
-                       "KAP": C.LinkColumn("KAP", display_text="aç", width="small")}
+                cfg = {
+                    "Hisse": C.TextColumn(width="small"),
+                    "Dönem": C.TextColumn(width="small"),
+                    "Final skor": C.NumberColumn(width="small", format="%d"),
+                    "Tespit": C.TextColumn(width="small"),
+                    "Kaynak": C.TextColumn(width="small"),
+                    "KAP bildirimi": C.TextColumn(width="medium"),
+                    "Değerleme": C.TextColumn(width="small"),
+                    "Final not": C.TextColumn(width="large"),
+                    "KAP": C.LinkColumn("KAP", display_text="aç", width="small"),
+                }
             st.dataframe(df, hide_index=True, use_container_width=True, column_config=cfg,
                          height=min(38 + 35 * max(len(df), 1) + 3, 20000))
+            # Final skor özet kartları (en yüksek 6)
+            try:
+                skorlu = [e for e in gor if e.get("final_skor") is not None]
+                if not skorlu:
+                    skorlu = []
+                    for e in gor:
+                        import re as _re
+                        mm = _re.search(r"Final(?:\s+skor)?\s+(\d+)/100", str(e.get("not") or ""))
+                        if mm:
+                            skorlu.append({**e, "final_skor": int(mm.group(1))})
+                skorlu = sorted(skorlu, key=lambda x: int(x.get("final_skor") or 0), reverse=True)[:6]
+                if skorlu:
+                    st.markdown("##### Final skor notları")
+                    st.caption("Yeni bilanço · kural tabanlı final skor (0–100). Yatırım tavsiyesi değildir.")
+                    cols = st.columns(min(3, len(skorlu)))
+                    for i, e in enumerate(skorlu):
+                        fs = int(e.get("final_skor") or 0)
+                        badge = "🟢" if fs >= 75 else ("🟡" if fs >= 60 else ("🟠" if fs >= 45 else "🔴"))
+                        with cols[i % len(cols)]:
+                            st.markdown(
+                                f"""
+<div style="background:linear-gradient(160deg,#1e293bcc,#0f172acc);border:1px solid #334155;
+border-radius:12px;padding:12px 14px;margin-bottom:8px;min-height:110px;">
+<div style="font-size:0.75rem;color:#94a3b8;">{badge} {e.get('kod')} · {e.get('donem') or '—'}</div>
+<div style="font-size:1.6rem;font-weight:700;color:#f1f5f9;">{fs}<span style="font-size:0.85rem;color:#94a3b8">/100</span></div>
+<div style="font-size:0.78rem;color:#cbd5e1;line-height:1.35;">{(str(e.get('not') or '')[:120])}</div>
+</div>
+""",
+                                unsafe_allow_html=True,
+                            )
+            except Exception:
+                pass
             kap_eksik = sum(1 for e in yeni if not e.get("kap"))
             if kap_eksik:
                 q1, q2 = st.columns([2, 3])
@@ -938,13 +1041,14 @@ def _render(st, key: str) -> None:
             eksik = sum(1 for e in yeni if not e.get("not") or e.get("not_bekliyor"))
             if eksik:
                 n1, n2 = st.columns([2, 3])
-                if n1.button("📝 Değerlendirme notlarını hesapla", key=f"{key}_notlar", disabled=_STATE["running"],
-                             help="İş Yatırım mali tablosundan satış / faaliyet / net kâr YoY ve net marj okunur."):
-                    with st.spinner("Bilanço notları hesaplanıyor…"):
-                        sonuc = notlari_guncelle()
+                if n1.button("📝 Final skor & notları hesapla", key=f"{key}_notlar", disabled=_STATE["running"],
+                             help="İş Yatırım mali tablo YoY + final skor 0–100."):
+                    with st.spinner("Final skorlar hesaplanıyor…"):
+                        sonuc = notlari_guncelle(yenile=True)
                     if sonuc.get("hata"):
                         st.warning(sonuc["hata"])
                     else:
+                        st.success(f"Güncellenen: {sonuc.get('guncellenen', 0)}")
                         st.rerun()
                 n2.caption(f"{eksik} kayıtta not yok / veri bekleniyor.")
                 if st.button("🤖 Otomatik yorum zenginleştir (gui)", key=f"{key}_auto_y",
