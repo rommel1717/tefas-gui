@@ -953,6 +953,9 @@ def _render(st, key: str) -> None:
             sec = st.selectbox("Tarih", ["Tümü"] + gunler, key=f"{key}_btarih",
                                format_func=lambda g: g if g == "Tümü" else f"{g} ({sayi[g]})")
             gor = [e for e in yeni if sec == "Tümü" or (e.get("tespit") or "")[:10] == sec]
+            # Ana görünüm: 20 satır + dikey kaydırma; tüm satırlar Excel'de
+            n_goster = st.slider("Ana görünüm satır sayısı", 10, 50, 20, 5, key=f"{key}_bil_n")
+            st.caption(f"Toplam **{len(gor)}** kayıt · ekranda ilk **{min(n_goster, len(gor))}** (aşağı kaydırın).")
             rows = []
             rz = son_rapor_zamani()
             for e in gor:
@@ -987,11 +990,66 @@ def _render(st, key: str) -> None:
                     "Kaynak": C.TextColumn(width="small"),
                     "KAP bildirimi": C.TextColumn(width="medium"),
                     "Değerleme": C.TextColumn(width="small"),
-                    "Final not": C.TextColumn(width="large"),
+                    "Final not": C.TextColumn(width="medium"),
                     "KAP": C.LinkColumn("KAP", display_text="aç", width="small"),
                 }
-            st.dataframe(df, hide_index=True, use_container_width=True, column_config=cfg,
-                         height=min(38 + 35 * max(len(df), 1) + 3, 20000))
+            # 20 satır yüksekliği ~ sabit panel; fazla satır dikey kayar. Genişlik sığdırılır.
+            _nvis = min(len(df), int(st.session_state.get(f"{key}_bil_n") or 20))
+            _row_h = 36
+            _hdr = 38
+            _height = _hdr + _row_h * max(_nvis, 1) + 8  # tam 20 satır sığsın, içeride kaydırma
+            # Final notu kısalt — yatay taşmayı azalt
+            if "Final not" in df.columns:
+                df = df.copy()
+                df["Final not"] = df["Final not"].astype(str).str.slice(0, 90)
+            st.dataframe(
+                df,
+                hide_index=True,
+                use_container_width=True,
+                column_config=cfg,
+                height=_height,
+            )
+
+            # Excel: tüm satırlar + KAP odaklı
+            try:
+                import io as _io
+                buf = _io.BytesIO()
+                with pd.ExcelWriter(buf, engine="openpyxl") as xl:
+                    df.to_excel(xl, sheet_name="Yeni_bilanco", index=False)
+                    kap_rows = []
+                    for e in (bil.get("yeni") or []):
+                        if e.get("kap") or e.get("url") or e.get("kap_nitelik"):
+                            kap_rows.append({
+                                "Hisse": e.get("kod"),
+                                "Dönem": e.get("donem"),
+                                "KAP": e.get("kap"),
+                                "KAP tarih": e.get("kap_tarih"),
+                                "Bildirim": e.get("kap_nitelik"),
+                                "URL": e.get("url"),
+                                "Final skor": e.get("final_skor"),
+                                "Not": e.get("not"),
+                            })
+                    if kap_rows:
+                        pd.DataFrame(kap_rows).to_excel(xl, sheet_name="KAP_bildirimleri", index=False)
+                _xb = buf.getvalue()
+                try:
+                    _rd = Path(__file__).resolve().parent / "tefas_raporlar"
+                    _rd.mkdir(parents=True, exist_ok=True)
+                    _xp = _rd / f"kap_bilanco_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+                    _xp.write_bytes(_xb)
+                    st.caption(f"💾 Kaydedildi: `{_xp}`")
+                except Exception:
+                    pass
+                st.download_button(
+                    "📥 Excel (bilanço + KAP bildirimleri)",
+                    data=_xb,
+                    file_name=f"kap_bilanco_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"{key}_kap_excel",
+                )
+            except Exception as _xe:
+                st.caption(f"Excel: {_xe}")
+
             # Final skor özet kartları (en yüksek 6)
             try:
                 skorlu = [e for e in gor if e.get("final_skor") is not None]

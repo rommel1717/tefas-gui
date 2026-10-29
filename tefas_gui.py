@@ -9,6 +9,7 @@ Mevcut tefas_core motorunu kullanır.
 from __future__ import annotations
 
 import io
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -833,6 +834,130 @@ def fmt_num(v, digits=1, suffix=""):
     return tr_num(v, digits=digits, suffix=suffix)
 
 
+
+def format_oran_deger(k, v) -> str:
+    """Oran tablosu hücresi — TR binlik / ondalık."""
+    if v is None or (isinstance(v, float) and v != v):
+        return "—"
+    key = str(k or "").lower()
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    # büyük tutarlar (parasal pozisyon, nakit, kâr)
+    if any(s in key for s in ("parasal", "nakit", "fcf", "hasilat", "kar", "kâr", "varlik", "borc_tutar")):
+        if abs(x) >= 1_000_000:
+            return tr_num(x, 0)
+        if abs(x) >= 1_000:
+            return tr_num(x, 0)
+        return tr_num(x, 2)
+    if key.endswith("_%") or "marj" in key or "roe" in key or "roa" in key or "yoy" in key:
+        return tr_num(x, 2)
+    if "oran" in key or "borc" in key or "fk" in key or "pd" in key:
+        return tr_num(x, 3 if abs(x) < 10 else 2)
+    if abs(x) >= 1000:
+        return tr_num(x, 0)
+    return tr_num(x, 2)
+
+
+def oranlar_tablo_df(oranlar: dict | None) -> pd.DataFrame:
+    """Oranlar dict → biçimli DataFrame."""
+    rows = []
+    for k, v in (oranlar or {}).items():
+        rows.append({"Oran": k, "Değer": format_oran_deger(k, v), "Ham": v})
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["Oran", "Değer"])
+
+
+def npp_etki_analizi(isy: dict | None) -> dict:
+    """
+    Net parasal pozisyonun net kâr üzerindeki etkisi (enflasyon muhasebesi).
+    düzeltilmiş_net ≈ net_kar - npp  (npp zarar ise negatif; çıkarılınca operasyonel net artar)
+    """
+    isy = isy or {}
+    oz = isy.get("ozet") or {}
+    oran = isy.get("oranlar") or {}
+
+    def _v(key):
+        it = oz.get(key) or {}
+        if isinstance(it, dict) and it.get("deger") is not None:
+            try:
+                return float(it["deger"])
+            except (TypeError, ValueError):
+                return None
+        try:
+            return float(oran[key]) if oran.get(key) is not None else None
+        except (TypeError, ValueError, KeyError):
+            return None
+
+    net = _v("net_donem_kari")
+    npp = _v("net_parasal_pozisyon")
+    if npp is None:
+        try:
+            npp = float(oran.get("net_parasal_pozisyon")) if oran.get("net_parasal_pozisyon") is not None else None
+        except (TypeError, ValueError):
+            npp = None
+    npp_yoy = None
+    try:
+        npp_yoy = float(oran["net_parasal_pozisyon_yoy"]) if oran.get("net_parasal_pozisyon_yoy") is not None else None
+    except (TypeError, ValueError):
+        npp_yoy = None
+    if npp_yoy is None:
+        it = oz.get("net_parasal_pozisyon") or {}
+        if isinstance(it, dict) and it.get("onceki_yoy") is not None:
+            try:
+                npp_yoy = float(it["onceki_yoy"])
+            except (TypeError, ValueError):
+                pass
+
+    out = {
+        "net_kar": net,
+        "npp": npp,
+        "npp_yoy": npp_yoy,
+        "net_npp_haric": None,  # operasyonel / parasal hariç yaklaşık
+        "npp_net_orani_%": None,
+        "yorumlar": [],
+    }
+    if net is None and npp is None:
+        out["yorumlar"].append("Net kâr ve NPP verisi yok.")
+        return out
+    if net is not None and npp is not None:
+        # Net kâr zaten NPP'yi içerir → NPP hariç ≈ net - npp
+        haric = net - npp
+        out["net_npp_haric"] = haric
+        if abs(net) > 1e-6:
+            out["npp_net_orani_%"] = round(npp / net * 100.0, 1)
+        out["yorumlar"].append(
+            f"Raporlanan net kâr {tr_num(net, 0)} ₺ · net parasal pozisyon {tr_num(npp, 0)} ₺."
+        )
+        out["yorumlar"].append(
+            f"**NPP hariç yaklaşık net:** {tr_num(haric, 0)} ₺ (net − NPP)."
+        )
+        if npp < 0 and net < 0:
+            out["yorumlar"].append(
+                "Hem net zarar hem NPP kaybı: zarar büyük ölçüde enflasyon muhasebesinden gelebilir."
+            )
+        elif npp < 0 and net > 0:
+            out["yorumlar"].append(
+                "Net kâr pozitif; NPP negatif — enflasyon etkisi kârı aşağı çekmiş."
+            )
+        elif npp > 0 and net > 0:
+            out["yorumlar"].append(
+                "NPP kazancı net kârı desteklemiş olabilir; operasyonel kârı ayrı okuyun."
+            )
+        if out.get("npp_net_orani_%") is not None:
+            out["yorumlar"].append(
+                f"NPP / net kâr oranı ≈ %{tr_num(out['npp_net_orani_%'], 1)}."
+            )
+    elif npp is not None:
+        out["yorumlar"].append(f"NPP {tr_num(npp, 0)} ₺ (net kâr satırı yok).")
+    if npp_yoy is not None and npp is not None:
+        out["yorumlar"].append(
+            f"Önceki dönem NPP {tr_num(npp_yoy, 0)} ₺."
+        )
+    return out
+
+
+
 def compact_num(v, *, digits: int = 2, suffix: str = "") -> str:
     """
     Panel KPI için kısa biçim: çok büyük sayıları mn/mlr ile sığdırır.
@@ -945,6 +1070,16 @@ def _hisse_paket(kod: str, *, force: bool = False) -> dict:
         out["momentum"] = bilanco_momentum(isy)
     except Exception:
         out["momentum"] = {}
+    # Net parasal pozisyon (enflasyon) — batch listeler için
+    try:
+        oz = isy.get("ozet") or {}
+        npp = oz.get("net_parasal_pozisyon") or {}
+        out["net_parasal_pozisyon"] = npp.get("deger") if isinstance(npp, dict) else None
+        out["net_parasal_onceki"] = npp.get("onceki_yoy") if isinstance(npp, dict) else None
+        out["net_kar"] = (oz.get("net_donem_kari") or {}).get("deger")
+    except Exception:
+        out["net_parasal_pozisyon"] = None
+        out["net_parasal_onceki"] = None
     return out
 
 
@@ -3122,6 +3257,24 @@ def mali_tablo_otomatik_yorum(isy: dict | None, deg: dict | None = None) -> dict
         olumsuz.append(f"Bilanço momentum skoru **{mom['skor']}/100** — {mom.get('ozet','')}")
         aksiyon.append("Zarar eden kalemleri ve borç değişimini derinlemesine bakın.")
 
+    # Net parasal pozisyon etkisi
+    try:
+        _ea = npp_etki_analizi(isy)
+        if _ea.get("npp") is not None:
+            for _y in (_ea.get("yorumlar") or [])[:3]:
+                notr.append(_y)
+            if _ea.get("npp") is not None and _ea.get("net_kar") is not None:
+                if _ea["npp"] < 0 and abs(_ea["npp"]) > abs(_ea["net_kar"]) * 0.5:
+                    olumsuz.append(
+                        "NPP kaybı net kârın büyük kısmına denk — enflasyon muhasebesi etkisini ayırın."
+                    )
+                elif _ea.get("net_npp_haric") is not None and _ea["net_npp_haric"] > 0 and (_ea.get("net_kar") or 0) < 0:
+                    olumlu.append(
+                        f"NPP hariç net pozitif (~{tr_num(_ea['net_npp_haric'], 0)} ₺) — raporlanan zarar NPP kaynaklı olabilir."
+                    )
+    except Exception:
+        pass
+
     # Özet paragraf
     n_ol = len(olumlu)
     n_olms = len(olumsuz)
@@ -3166,7 +3319,7 @@ def render_otomatik_bilanco_yorum(yorum: dict, *, baslik: str = "Otomatik bilan�
 
 
 def hazir_profil_filtrele(df: pd.DataFrame, profil: str) -> pd.DataFrame:
-    """Dengeli / Değer / Kalite / Momentum / Taze bilanço."""
+    """Dengeli / Değer / Kalite / Momentum / Taze bilanço / Enflasyon düzeltilmiş değer."""
     if df is None or getattr(df, "empty", True):
         return df
     d = df.copy()
@@ -3178,6 +3331,7 @@ def hazir_profil_filtrele(df: pd.DataFrame, profil: str) -> pd.DataFrame:
     for col, alias in (
         ("F/K", "_fk"), ("PD/DD", "_pddd"), ("kalite_skor", "_kal"),
         ("ucuzluk_skor", "_uc"), ("model_sinyal", "_sig"), ("birlesik_ortalama", "_bir"),
+        ("net_parasal_pozisyon", "_npp"), ("net_parasal_onceki", "_npp0"), ("net_kar", "_net"),
     ):
         if col in d.columns:
             d[alias] = _num(d[col])
@@ -3216,6 +3370,31 @@ def hazir_profil_filtrele(df: pd.DataFrame, profil: str) -> pd.DataFrame:
             d = d[(d["_pddd"].isna()) | (d["_pddd"] <= 2.5)]
         if "_kal" in d.columns:
             d = d.sort_values(["_kal", "_bir"] if "_bir" in d.columns else ["_kal"], ascending=[False, False] if "_bir" in d.columns else [False], na_position="last")
+        elif "_bir" in d.columns:
+            d = d.sort_values("_bir", ascending=False, na_position="last")
+    elif profil == "Enflasyon düzeltilmiş değer":
+        # NPP hariç ROE / değer skoru / düşük düzeltilmiş F/K
+        if "deger_skor_npp_haric" in d.columns:
+            d["_dv"] = pd.to_numeric(d["deger_skor_npp_haric"], errors="coerce")
+        elif "deger_skor" in d.columns:
+            d["_dv"] = pd.to_numeric(d["deger_skor"], errors="coerce")
+        else:
+            d["_dv"] = pd.NA
+        if "ROE_npp_haric" in d.columns:
+            d["_roe_a"] = pd.to_numeric(d["ROE_npp_haric"], errors="coerce")
+        else:
+            d["_roe_a"] = pd.NA
+        if "F/K_npp_haric" in d.columns:
+            d["_fk_a"] = pd.to_numeric(d["F/K_npp_haric"], errors="coerce")
+            d = d[(d["_fk_a"].isna()) | ((d["_fk_a"] > 0) & (d["_fk_a"] <= 18))]
+        elif "_fk" in d.columns:
+            d = d[(d["_fk"].isna()) | ((d["_fk"] > 0) & (d["_fk"] <= 15))]
+        # NPP kaybı olanları önceliklendirme (enflasyon etkisini ayıranlar)
+        if "net_parasal_pozisyon" in d.columns:
+            d["_npp"] = pd.to_numeric(d["net_parasal_pozisyon"], errors="coerce")
+        sort_cols = [c for c in ("_dv", "_roe_a", "_bir") if c in d.columns]
+        if sort_cols:
+            d = d.sort_values(sort_cols, ascending=[False] * len(sort_cols), na_position="last")
         elif "_bir" in d.columns:
             d = d.sort_values("_bir", ascending=False, na_position="last")
     else:
@@ -3284,11 +3463,120 @@ def hisse_birlesik_satir(kod: str, *, force_isy: bool = False) -> dict:
         if isy and not isy.get("error"):
             row["bilanco_donem"] = isy.get("gunce_donem")
             orans = isy.get("oranlar") or {}
+            oz = isy.get("ozet") or {}
             if orans.get("ROE_%") is not None:
                 row["ROE"] = orans["ROE_%"]
                 deg["ROE"] = row["ROE"]
+            # Enflasyon muhasebesi — tüm şirketler
+            npp = oz.get("net_parasal_pozisyon") or {}
+            if isinstance(npp, dict) and npp.get("deger") is not None:
+                row["net_parasal_pozisyon"] = npp.get("deger")
+                row["net_parasal_onceki"] = npp.get("onceki_yoy")
+            elif orans.get("net_parasal_pozisyon") is not None:
+                row["net_parasal_pozisyon"] = orans.get("net_parasal_pozisyon")
+                row["net_parasal_onceki"] = orans.get("net_parasal_pozisyon_yoy")
+            for _k, _rk in (("net_donem_kari", "net_kar"), ("hasilat", "hasilat"), ("ozkaynaklar", "ozkaynak")):
+                it = oz.get(_k) or {}
+                if isinstance(it, dict) and it.get("deger") is not None:
+                    row[_rk] = it.get("deger")
+            # NPP yoksa KAP dene (sessiz)
+            try:
+                if row.get("net_parasal_pozisyon") is None:
+                    isy = mali_tablo_npp_kap_doldur(isy, kod)
+                    npp = (isy.get("ozet") or {}).get("net_parasal_pozisyon") or {}
+                    if isinstance(npp, dict) and npp.get("deger") is not None:
+                        row["net_parasal_pozisyon"] = npp.get("deger")
+                        row["net_parasal_onceki"] = npp.get("onceki_yoy")
+            except Exception:
+                pass
     except Exception:
         isy = {}
+
+    # ── Enflasyon (NPP) olmasaydı: düzeltilmiş kârlılık & değer ──
+    try:
+        _ea = npp_etki_analizi(isy if isinstance(isy, dict) else {})
+        npp = row.get("net_parasal_pozisyon")
+        if npp is None:
+            npp = _ea.get("npp")
+        net = row.get("net_kar") if row.get("net_kar") is not None else _ea.get("net_kar")
+        has = row.get("hasilat")
+        ozv = row.get("ozkaynak")
+        net_adj = _ea.get("net_npp_haric")
+        if net_adj is None and net is not None and npp is not None:
+            net_adj = net - npp
+        row["net_npp_haric"] = net_adj
+        row["npp"] = npp
+        # ROE düzeltilmiş
+        if net_adj is not None and ozv and float(ozv) != 0:
+            row["ROE_npp_haric"] = round(float(net_adj) / float(ozv) * 100.0, 2)
+        # Marj düzeltilmiş
+        if net_adj is not None and has and float(has) != 0:
+            row["net_marj_npp_haric_%"] = round(float(net_adj) / float(has) * 100.0, 2)
+        # Raporlanan ROE/marj
+        if net is not None and ozv and float(ozv) != 0 and row.get("ROE") is None:
+            row["ROE"] = round(float(net) / float(ozv) * 100.0, 2)
+        if net is not None and has and float(has) != 0:
+            row["net_marj_%"] = round(float(net) / float(has) * 100.0, 2)
+        # F/K yaklaşık: piyasa değeri / net; düzeltilmiş F/K = PD / net_adj
+        pd_ = deg.get("piyasa_değeri") or deg.get("piyasa_degeri")
+        try:
+            pd_ = float(pd_) if pd_ is not None else None
+        except (TypeError, ValueError):
+            pd_ = None
+        fk = row.get("F/K")
+        if pd_ is not None and net_adj is not None and abs(float(net_adj)) > 1:
+            # ölçek: PD mn, net tam TL olabilir
+            fk_adj = pd_ / (net_adj / 1e6) if abs(net_adj) > 1e5 and pd_ < 1e7 else pd_ / net_adj
+            if fk_adj < 0:
+                row["F/K_npp_haric"] = None  # zarar → anlamsız
+            else:
+                row["F/K_npp_haric"] = round(float(fk_adj), 2)
+        elif fk is not None and net is not None and net_adj is not None and abs(float(net)) > 1:
+            # F/K * net / net_adj
+            try:
+                row["F/K_npp_haric"] = round(float(fk) * float(net) / float(net_adj), 2) if float(net_adj) > 0 else None
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
+        # Değer skoru (NPP düzeltilmiş)
+        deg_adj = dict(deg)
+        if row.get("F/K_npp_haric") is not None:
+            deg_adj["F/K"] = row["F/K_npp_haric"]
+        if row.get("ROE_npp_haric") is not None:
+            deg_adj["ROE"] = row["ROE_npp_haric"]
+        isy_adj = dict(isy) if isinstance(isy, dict) else {}
+        oz_adj = dict(isy_adj.get("ozet") or {})
+        if net_adj is not None:
+            oz_adj["net_donem_kari"] = {
+                "deger": net_adj,
+                "onceki_yoy": None,
+                "degisim_%": None,
+                "kalem": "Net kâr (NPP hariç≈)",
+            }
+        isy_adj["ozet"] = oz_adj
+        or_adj = dict(isy_adj.get("oranlar") or {})
+        if row.get("ROE_npp_haric") is not None:
+            or_adj["ROE_%"] = row["ROE_npp_haric"]
+        if row.get("net_marj_npp_haric_%") is not None:
+            or_adj["net_kar_marji_%"] = row["net_marj_npp_haric_%"]
+        isy_adj["oranlar"] = or_adj
+        try:
+            gb = deger_yatirim_graham_buffett(deg=deg_adj, isy=isy_adj, m=m)
+            row["deger_skor"] = gb.get("deger_skor")
+            row["deger_skor_npp_haric"] = gb.get("deger_skor")
+            row["graham_gecen"] = gb.get("graham_gecen")
+            row["buffett_gecen"] = gb.get("buffett_gecen")
+            row["deger_seviye"] = gb.get("deger_seviye")
+        except Exception:
+            pass
+        # raporlanan değer skoru da
+        try:
+            gb0 = deger_yatirim_graham_buffett(deg=deg, isy=isy if isinstance(isy, dict) else {}, m=m)
+            row["deger_skor_rapor"] = gb0.get("deger_skor")
+        except Exception:
+            pass
+    except Exception:
+        pass
+
     kal = bilanco_kalite_skoru(isy if isinstance(isy, dict) else {}, deg)
     tu = tarihsel_ucuzluk_analizi(kod, fd=fd, deg=deg)
     sig = model_sinyal_skoru(m=m, deg=deg, kalite=kal, tu=tu)
@@ -3361,6 +3649,179 @@ def _svg_bar_chart(labels: list, values: list, title: str = "", width: int = 640
         f'<svg viewBox="0 0 {width} {height}" width="100%" height="{height}">'
         f'{"".join(bars)}</svg></div>'
     )
+
+
+
+def fon_swot_al_tut_sat(m: dict | None = None, *, profil: dict | None = None, liq: dict | None = None, an: dict | None = None) -> dict:
+    """
+    Fon için kural tabanlı SWOT + AL/TUT/SAT + rakam sözlüğü.
+    Yatırım tavsiyesi değildir.
+    """
+    m = m or {}
+    profil = profil or {}
+    liq = liq or {}
+    an = an or {}
+
+    def f(k, default=None):
+        try:
+            v = m.get(k)
+            if v is None:
+                return default
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
+    g1y = f("getiri_1y")
+    reel = f("reel_1y")
+    sh = f("sharpe")
+    so = f("sortino")
+    dd = f("max_drawdown")
+    vol = f("volatilite")
+    vs_m = f("vs_mevduat")
+    vs_b = f("vs_bist100")
+    win = f("kazanma_orani")
+    cagr = f("cagr")
+    calmar = f("calmar")
+    g1a = f("getiri_1a")
+    g3a = f("getiri_3a")
+
+    sozluk = [
+        ("Sharpe", sh, "Risk birimi başına fazla getiri. ~0.5 zayıf, ~1 iyi, >1.5 güçlü (yaklaşık)."),
+        ("Sortino", so, "Sadece aşağı yön riskine göre Sharpe benzeri; yüksek daha iyi."),
+        ("Max DD %", dd, "Tepe-dip en büyük düşüş. -10 ılımlı, -30+ ağır (mutlak değer)."),
+        ("Volatilite %", vol, "Getiri oynaklığı. Düşük = daha sakin seyir."),
+        ("vs Mevduat", vs_m, "Mevduata göre fazla/eksi getiri (puan). Pozitif = mevduatı geçmiş."),
+        ("vs BIST100", vs_b, "BIST100'e göre rölatif. Hisse fonunda anlamlı."),
+        ("Kazanma %", win, "Pozitif gün oranı. 50 civarı nötr."),
+        ("CAGR %", cagr, "Yıllık bileşik getiri (yaklaşık)."),
+        ("Reel 1Y %", reel, "Enflasyon sonrası 1 yıllık yaklaşık getiri."),
+    ]
+
+    S, W, O, T = [], [], [], []
+    puan = 0.0
+    max_p = 0.0
+
+    def add(cond_pos, cond_neg, s_msg, w_msg, w=1.0):
+        nonlocal puan, max_p
+        max_p += 2 * w
+        if cond_pos:
+            puan += 2 * w
+            if s_msg:
+                S.append(s_msg)
+        elif cond_neg:
+            puan -= 2 * w
+            if w_msg:
+                W.append(w_msg)
+
+    if g1y is not None:
+        add(g1y >= 25, g1y < 0, f"1Y getiri %{g1y:.1f} güçlü", f"1Y getiri %{g1y:.1f} zayıf", 1.2)
+    if reel is not None:
+        add(reel >= 5, reel < -5, f"Reel 1Y %{reel:.1f} enflasyon üstü", f"Reel 1Y %{reel:.1f} enflasyon altı", 1.2)
+    if sh is not None:
+        add(sh >= 1.0, sh < 0.3, f"Sharpe {sh:.2f} iyi risk-getiri", f"Sharpe {sh:.2f} zayıf", 1.5)
+    if so is not None:
+        add(so >= 1.2, so < 0.4, f"Sortino {so:.2f} aşağı risk kontrolü iyi", f"Sortino {so:.2f} zayıf", 1.0)
+    if dd is not None:
+        add(dd > -15, dd < -35, f"Max DD %{dd:.1f} görece kontrollü", f"Max DD %{dd:.1f} derin düşüş", 1.3)
+    if vol is not None:
+        add(vol < 12, vol > 25, f"Volatilite %{vol:.1f} sakin", f"Volatilite %{vol:.1f} yüksek", 0.8)
+    if vs_m is not None:
+        add(vs_m >= 0, vs_m < -5, f"Mevduata göre +{vs_m:.1f} puan", f"Mevduata göre {vs_m:.1f} puan", 1.2)
+    if win is not None:
+        add(win >= 55, win < 45, f"Kazanma oranı %{win:.0f}", f"Kazanma oranı %{win:.0f}", 0.7)
+    if calmar is not None:
+        add(calmar >= 0.8, calmar < 0.2, f"Calmar {calmar:.2f}", f"Calmar {calmar:.2f}", 0.6)
+
+    # Momentum kısa vade
+    if g1a is not None and g1a < -8:
+        W.append(f"Son 1 ay %{g1a:.1f} — kısa vadeli baskı")
+        puan -= 0.8
+        max_p += 1
+    if g3a is not None and g3a >= 10:
+        S.append(f"3 aylık getiri %{g3a:.1f}")
+        puan += 0.8
+        max_p += 1
+
+    if (liq.get("likidite_seviye") or "").lower() in ("yüksek", "iyi", "yuksek"):
+        S.append("Likidite görece iyi")
+    elif liq.get("likidite_bayrak"):
+        W.append(str(liq.get("likidite_bayrak")))
+    if an.get("risk_bayrak"):
+        T.append(str(an.get("risk_bayrak")))
+
+    O.append("Kategori/tefas dağılımı uygunsa düzenli tasarruf ile birikim aracı olabilir")
+    O.append("Mevduat ve enflasyon ile periyodik karşılaştırma fırsatı")
+    T.append("Piyasa likiditesi, faiz ve kur şokları fon getirisini bozabilir")
+    T.append("Geçmiş getiri gelecek garantisi değildir")
+
+    if max_p <= 0:
+        norm = 0.0
+    else:
+        norm = max(-100.0, min(100.0, (puan / max_p) * 100.0))
+
+    if norm >= 35:
+        karar, renk = "AL", "ok"
+        karar_tr = "Model: AL (görece olumlu profil — kademeli / limitli düşünülebilir)"
+    elif norm <= -35:
+        karar, renk = "SAT", "bad"
+        karar_tr = "Model: SAT / azalt (risk-getiri zayıf veya düşüş derin)"
+    else:
+        karar, renk = "TUT", "warn"
+        karar_tr = "Model: TUT / bekle (karışık sinyal — mevcut pozisyonu gözden geçir)"
+
+    tavsiye = [
+        f"**{karar}** — skor {norm:+.0f} (kural tabanlı model).",
+        "Rakamları tek başına değil; vade, risk iştahı ve alternatif (mevduat/BIST) ile birlikte okuyun.",
+        "Yüksek MaxDD ve düşük Sharpe birlikteyse temkin; yüksek Sharpe + pozitif reel getiri daha destekleyici.",
+    ]
+    if vs_m is not None and vs_m < 0 and karar == "AL":
+        tavsiye.append("Mevduatı geçememiş; AL sinyali zayıf — TUT’a yakın okuyun.")
+    if dd is not None and dd < -30:
+        tavsiye.append("Derin MaxDD: ekleme için küçük dilimler tercih edilebilir.")
+
+    return {
+        "karar": karar,
+        "karar_tr": karar_tr,
+        "renk": renk,
+        "skor": round(norm, 1),
+        "S": S or ["Belirgin güç sinyali yok"],
+        "W": W or ["Belirgin zayıflık işaretlenmedi"],
+        "O": O,
+        "T": T,
+        "sozluk": sozluk,
+        "tavsiye": tavsiye,
+        "disclaimer": "Fon model kararı kural tabanlıdır; SPK kapsamında yatırım tavsiyesi değildir.",
+    }
+
+
+def fon_karar_html_blogu(kar: dict) -> str:
+    """HTML raporuna eklenecek SWOT + AL/TUT/SAT bloğu."""
+    kar = kar or {}
+    def li(xs):
+        return "".join(f"<li>{_html_escape(x)}</li>" for x in (xs or []))
+    soz = "".join(
+        f"<tr><td><b>{_html_escape(a)}</b></td><td>{_html_escape('—' if b is None else f'{b:.2f}' if isinstance(b, float) else b)}</td>"
+        f"<td>{_html_escape(c)}</td></tr>"
+        for a, b, c in (kar.get("sozluk") or [])
+    )
+    return f"""
+<section class="sec" style="margin-top:18px">
+  <h2>Model karar · AL / TUT / SAT + SWOT</h2>
+  <p><b>{_html_escape(kar.get('karar') or '—')}</b> · skor {kar.get('skor')} · {_html_escape(kar.get('karar_tr') or '')}</p>
+  <div class="warn">{_html_escape(kar.get('disclaimer') or '')}</div>
+  <h3>Akıllı tavsiye</h3>
+  <ul>{li(kar.get('tavsiye'))}</ul>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+    <div><h3>Strengths</h3><ul>{li(kar.get('S'))}</ul></div>
+    <div><h3>Weaknesses</h3><ul>{li(kar.get('W'))}</ul></div>
+    <div><h3>Opportunities</h3><ul>{li(kar.get('O'))}</ul></div>
+    <div><h3>Threats</h3><ul>{li(kar.get('T'))}</ul></div>
+  </div>
+  <h3>Rakamlar ne anlama geliyor?</h3>
+  <table class="data"><thead><tr><th>Metrik</th><th>Değer</th><th>Anlam</th></tr></thead>
+  <tbody>{soz}</tbody></table>
+</section>
+"""
 
 
 def rapor_paketi_html(
@@ -3834,6 +4295,316 @@ def _onceki_donem(yil: int, donem: int) -> tuple[int, int]:
     return yil - 1, 12
 
 
+
+def _tr_sayi_parse(s) -> float | None:
+    """TR sayı: -225.120.381 veya -225,120.381 → float."""
+    if s is None:
+        return None
+    t = str(s).strip()
+    if not t or t in ("—", "-", "None", "nan"):
+        return None
+    t = t.replace("\xa0", "").replace(" ", "")
+    # (123) → -123
+    if t.startswith("(") and t.endswith(")"):
+        t = "-" + t[1:-1]
+    # binlik . ondalık ,
+    if re.search(r",\d{1,2}$", t) and t.count(",") == 1:
+        t = t.replace(".", "").replace(",", ".")
+    elif t.count(".") > 1 or (t.count(".") == 1 and not re.search(r"\.\d{1,2}$", t)):
+        t = t.replace(".", "")
+    else:
+        t = t.replace(",", "")
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def kap_bildirim_id_from_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    m = re.search(r"/Bildirim/(\d+)", str(url), re.I)
+    return m.group(1) if m else None
+
+
+def kap_bildirim_ids_for_kod(kod: str) -> list[str]:
+    """panel_data, cache, bilanço KAP kayıtlarından bildirim id topla."""
+    kod = str(kod).upper().replace(".IS", "").strip()
+    ids: list[str] = []
+
+    def _add(did):
+        if did is None:
+            return
+        s = str(did).strip()
+        if s.isdigit() and s not in ids:
+            ids.append(s)
+
+    # cache
+    try:
+        cache_p = Path(__file__).resolve().parent / "panel_data" / "kap_npp_cache.json"
+        if cache_p.exists():
+            import json
+            cache = json.loads(cache_p.read_text(encoding="utf-8"))
+            if kod in cache:
+                _add((cache[kod] or {}).get("disclosure_id"))
+    except Exception:
+        pass
+    # bilanco.json
+    try:
+        p = Path(__file__).resolve().parent / "panel_data" / "bilanco.json"
+        if p.exists():
+            import json
+            bil = json.loads(p.read_text(encoding="utf-8"))
+            for e in bil.get("yeni") or []:
+                if str(e.get("kod") or "").upper() != kod:
+                    continue
+                _add(e.get("kap") or kap_bildirim_id_from_url(e.get("url")))
+    except Exception:
+        pass
+    # session
+    try:
+        for e in (st.session_state.get("bilanco_yeni") or []):
+            if str(e.get("kod") or "").upper() != kod:
+                continue
+            _add(e.get("kap") or kap_bildirim_id_from_url(e.get("url")))
+    except Exception:
+        pass
+    # Bilinen finansal rapor bildirimleri (yedek)
+    _KNOWN_KAP = {
+        "BNTAS": "1689107",
+    }
+    if kod in _KNOWN_KAP:
+        _add(_KNOWN_KAP[kod])
+    return ids
+
+
+def kap_otomatik_bildirim_ara(kod: str, *, gun: int = 120) -> list[str]:
+    """
+    KAP'ta hisse kodu için finansal rapor bildirim id'lerini ara (HTML sorgu sayfası / bilinen export).
+    Başarısız olursa boş liste.
+    """
+    kod = str(kod).upper().replace(".IS", "").strip()
+    ids: list[str] = []
+    try:
+        import urllib.request
+        import urllib.parse
+        # Bildirim sorgu — keyword ile
+        # KAP public search endpoint denemeleri
+        endpoints = [
+            f"https://www.kap.org.tr/tr/api/memberDisclosureQuery",
+        ]
+        # Basit: KAP site içi arama sayfası HTML
+        q = urllib.parse.quote(kod)
+        search_urls = [
+            f"https://www.kap.org.tr/tr/bildirim-sorgu",
+        ]
+        # Son çare: Google-style değil; bilanço panel RSS benzeri yoksa
+        # disclosure list page with stock
+        for u in [
+            f"https://www.kap.org.tr/tr/api/disclosures?keyword={q}&from=0&size=30",
+            f"https://www.kap.org.tr/tr/api/disclosure/search?term={q}",
+        ]:
+            try:
+                req = urllib.request.Request(
+                    u,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Accept": "application/json, text/html",
+                        "Referer": "https://www.kap.org.tr/",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    body = r.read().decode("utf-8", errors="replace")
+                for m in re.finditer(r"/Bildirim/([0-9]{6,9})", body, re.I):
+                    did = m.group(1)
+                    if did not in ids:
+                        ids.append(did)
+                if ids:
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+    # Finansal rapor başlıklı bildirimleri tercih et — id sırası yeter
+    return ids[:10]
+
+
+def kap_excel_html_indir(disclosure_id: str) -> str | None:
+    """KAP bildirim Excel (aslında HTML) dışa aktarımını indir."""
+    did = str(disclosure_id).strip()
+    if not did.isdigit():
+        return None
+    url = f"https://www.kap.org.tr/tr/api/notification/export/excel/{did}"
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; TEFAS-GUI/1.0)",
+                "Accept": "*/*",
+                "Referer": f"https://www.kap.org.tr/tr/Bildirim/{did}",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=45) as r:
+            raw = r.read()
+        text = raw.decode("utf-8", errors="replace")
+        if "parasal" in text.lower() or "gelir" in text.lower() or "<td" in text.lower():
+            return text
+    except Exception:
+        return None
+    return None
+
+
+def kap_parse_net_parasal_from_html(html: str) -> dict:
+    """
+    KAP Excel-HTML içinden Net Parasal Pozisyon satırını ve komşu dönem değerlerini çıkar.
+    Örnek BNTAS: -225.120.381 | -206.184.994 | ...
+    """
+    out = {
+        "net_parasal_pozisyon": None,
+        "net_parasal_onceki": None,
+        "net_parasal_degerler": [],
+        "kalem": "Net Parasal Pozisyon Kazançları (Kayıpları)",
+        "kaynak": "KAP",
+    }
+    if not html:
+        return out
+    # satır bloğu
+    m = re.search(
+        r"Net Parasal Pozisyon Kazançları \(Kayıpları\)(.{0,2500})",
+        html,
+        re.I | re.S,
+    )
+    if not m:
+        m = re.search(r"Gains \(losses\) on net monetary position(.{0,2500})", html, re.I | re.S)
+    if not m:
+        return out
+    chunk = m.group(0)
+    # td içerikleri
+    cells = re.findall(r"<td[^>]*>(.*?)</td>", chunk, re.I | re.S)
+    vals = []
+    for c in cells:
+        t = re.sub(r"<[^>]+>", "", c).strip()
+        if not t or t.isdigit() and len(t) <= 3:  # taxonomy 24
+            # yine de büyük sayı değilse atla
+            num = _tr_sayi_parse(t)
+            if num is not None and abs(num) >= 1000:
+                vals.append(num)
+            continue
+        num = _tr_sayi_parse(t)
+        if num is not None and abs(num) >= 100:  # anlamlı tutar
+            vals.append(num)
+    # alternatif: düz metin sayıları
+    if not vals:
+        for t in re.findall(r"-?\d{1,3}(?:\.\d{3})+", chunk):
+            num = _tr_sayi_parse(t)
+            if num is not None:
+                vals.append(num)
+    out["net_parasal_degerler"] = vals
+    if vals:
+        out["net_parasal_pozisyon"] = vals[0]
+        if len(vals) > 1:
+            out["net_parasal_onceki"] = vals[1]
+    return out
+
+
+def kap_bildirim_net_parasal(kod: str, disclosure_id: str | None = None) -> dict:
+    """
+    Hisse için KAP finansal bildirimden net parasal pozisyon (enflasyon muhasebesi).
+    disclosure_id verilmezse panel_data bilanço KAP linklerinden dener.
+    """
+    kod = str(kod).upper().replace(".IS", "").strip()
+    out = {
+        "kod": kod,
+        "disclosure_id": None,
+        "net_parasal_pozisyon": None,
+        "net_parasal_onceki": None,
+        "net_parasal_degerler": [],
+        "url": None,
+        "kaynak": "KAP",
+        "error": None,
+    }
+    ids = []
+    if disclosure_id:
+        ids.append(str(disclosure_id).strip())
+    ids.extend(kap_bildirim_ids_for_kod(kod))
+    if not ids:
+        try:
+            ids.extend(kap_otomatik_bildirim_ara(kod))
+        except Exception:
+            pass
+    # unique
+    seen = set()
+    ids = [x for x in ids if x and str(x).isdigit() and x not in seen and not seen.add(x)]
+    if not ids:
+        out["error"] = "KAP bildirim id bulunamadı — panel yeni bilanço veya bildirim no girin"
+        return out
+    for did in ids[:5]:
+        html = kap_excel_html_indir(did)
+        if not html:
+            continue
+        parsed = kap_parse_net_parasal_from_html(html)
+        if parsed.get("net_parasal_pozisyon") is not None:
+            out.update({
+                "disclosure_id": did,
+                "net_parasal_pozisyon": parsed["net_parasal_pozisyon"],
+                "net_parasal_onceki": parsed.get("net_parasal_onceki"),
+                "net_parasal_degerler": parsed.get("net_parasal_degerler") or [],
+                "url": f"https://www.kap.org.tr/tr/Bildirim/{did}",
+                "error": None,
+            })
+            try:
+                import json
+                cache_p = Path(__file__).resolve().parent / "panel_data" / "kap_npp_cache.json"
+                cache_p.parent.mkdir(parents=True, exist_ok=True)
+                cache = {}
+                if cache_p.exists():
+                    cache = json.loads(cache_p.read_text(encoding="utf-8"))
+                cache[kod] = {
+                    "disclosure_id": did,
+                    "net_parasal_pozisyon": out["net_parasal_pozisyon"],
+                    "net_parasal_onceki": out.get("net_parasal_onceki"),
+                    "url": out["url"],
+                }
+                cache_p.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+            return out
+    out["error"] = "KAP Excel içinde net parasal satırı bulunamadı"
+    if ids:
+        out["disclosure_id"] = ids[0]
+        out["url"] = f"https://www.kap.org.tr/tr/Bildirim/{ids[0]}"
+    return out
+
+
+def mali_tablo_npp_kap_doldur(isy: dict, kod: str, disclosure_id: str | None = None) -> dict:
+    """İş Yatırım ozetinde NPP yoksa KAP'tan doldur."""
+    if not isinstance(isy, dict):
+        return isy
+    oz = isy.setdefault("ozet", {})
+    oran = isy.setdefault("oranlar", {})
+    cur = oz.get("net_parasal_pozisyon") or {}
+    if isinstance(cur, dict) and cur.get("deger") is not None:
+        isy["npp_kaynak"] = isy.get("npp_kaynak") or "İş Yatırım"
+        return isy
+    kap = kap_bildirim_net_parasal(kod, disclosure_id=disclosure_id)
+    if kap.get("net_parasal_pozisyon") is not None:
+        oz["net_parasal_pozisyon"] = {
+            "deger": kap["net_parasal_pozisyon"],
+            "onceki_yoy": kap.get("net_parasal_onceki"),
+            "degisim_%": None,
+            "kalem": "Net Parasal Pozisyon Kazançları (Kayıpları) — KAP",
+        }
+        oran["net_parasal_pozisyon"] = kap["net_parasal_pozisyon"]
+        if kap.get("net_parasal_onceki") is not None:
+            oran["net_parasal_pozisyon_yoy"] = kap["net_parasal_onceki"]
+        isy["npp_kaynak"] = f"KAP:{kap.get('disclosure_id')}"
+        isy["kap_npp"] = kap
+    else:
+        isy["kap_npp"] = kap
+    return isy
+
+
 def isyatirim_mali_tablo(
     kod: str,
     *,
@@ -4050,6 +4821,8 @@ def isyatirim_mali_tablo(
         "esas_faaliyet_kari": ("3DF", "3H", "3E"),
         "net_donem_kari": ("3L", "3J", "3I"),
         "favok": ("3HACA",),
+        # TMS 29 / enflasyon muhasebesi — net parasal pozisyon kâr/zararı
+        "net_parasal_pozisyon": ("3KJ", "3KI", "3KH", "3KG"),
         # Nakit akım kalemleri (İş Yatırım itemCode — grupta yoksa açıklamadan tamamlanır)
         "isletme_nakit": ("4A", "4AA", "4"),
         "yatirim_nakit": ("4B", "4BA"),
@@ -4171,6 +4944,53 @@ def isyatirim_mali_tablo(
         ozet["serbest_nakit_akim"] = {"deger": fcf, "onceki_yoy": None, "degisim_%": None, "kalem": "Serbest nakit akım (FCF≈)"}
         oranlar["FCF"] = fcf
 
+    # Net parasal pozisyon (enflasyon muhasebesi) — açıklama ile gelir satırlarından
+    npp, npp_lab = _scan_rows(
+        gelir_rows,
+        (
+            "net parasal pozisyon",
+            "parasal pozisyon kazanç",
+            "parasal pozisyon kayıp",
+            "parasal pozisyon",
+            "enflasyon muhasebesi",
+            "net monetary position",
+        ),
+    )
+    if npp is None:
+        npp, npp_lab = _scan_rows(
+            bilanco_rows,
+            ("net parasal pozisyon", "parasal pozisyon"),
+        )
+    # YoY için ikinci kolon
+    npp_yoy = None
+    if npp is not None:
+        for rec in list(gelir_rows) + list(bilanco_rows):
+            desc = str(rec.get("kalem") or rec.get("desc") or "").lower()
+            if "parasal pozisyon" not in desc and "monetary position" not in desc:
+                continue
+            labs = list(col_labels or [])
+            vals = []
+            for lab in labs:
+                if lab in rec and rec[lab] is not None:
+                    try:
+                        vals.append(float(rec[lab]))
+                    except (TypeError, ValueError):
+                        vals.append(None)
+            if vals:
+                npp = vals[0]
+                if len(vals) > 1 and vals[1] is not None:
+                    npp_yoy = vals[1]
+            break
+        ozet["net_parasal_pozisyon"] = {
+            "deger": npp,
+            "onceki_yoy": npp_yoy,
+            "degisim_%": round((npp / npp_yoy - 1) * 100, 2) if npp is not None and npp_yoy else None,
+            "kalem": "Net parasal pozisyon kazançları (kayıpları) — enflasyon muhasebesi",
+        }
+        oranlar["net_parasal_pozisyon"] = npp
+        if npp_yoy is not None:
+            oranlar["net_parasal_pozisyon_yoy"] = npp_yoy
+
     gunce = col_labels[0] if col_labels else None
 
     # Global aktif dönemi hisse bazlı güncelle (daha yeni ise)
@@ -4220,6 +5040,10 @@ def isyatirim_mali_tablo(
         "_cache_day": bugun,
         "guncel_mi": True,
     }
+    try:
+        out = mali_tablo_npp_kap_doldur(out, kod)
+    except Exception:
+        pass
     cache[ck] = out
     return out
 
@@ -4252,6 +5076,8 @@ def mali_tablolar_ileri_analiz(isy: dict | None, deg: dict | None = None) -> dic
 
     nakit = _v("donem_sonu_nakit") or _v("nakit")
     fcf = _v("serbest_nakit_akim") or oran.get("FCF")
+    npp = _v("net_parasal_pozisyon") or oran.get("net_parasal_pozisyon")
+    npp_yoy = oran.get("net_parasal_pozisyon_yoy")
     op_cf = _v("isletme_nakit")
     inv_cf = _v("yatirim_nakit")
     fin_cf = _v("finansman_nakit")
@@ -4350,6 +5176,33 @@ def mali_tablolar_ileri_analiz(isy: dict | None, deg: dict | None = None) -> dic
             skor -= 6
     if ch_e is not None:
         gelir_yorum.append(f"Esas faaliyet kârı YoY %{ch_e:+.1f}.")
+    if npp is not None:
+        gelir_yorum.append(
+            f"**Net parasal pozisyon (enflasyon muhasebesi)** {npp:,.0f} ₺"
+            + (f" · önceki dönem {npp_yoy:,.0f} ₺" if npp_yoy is not None else "")
+            + ". Bu kalem TMS 29 parasal pozisyon kazanç/kayıplarını yansıtır; "
+              "operasyonel kârdan ayrı okunmalıdır."
+        )
+        if npp < 0 and net is not None and net < 0:
+            gelir_yorum.append(
+                "Net zarar ile parasal pozisyon kaybı birlikte: raporlanan net zarar "
+                "önemli ölçüde enflasyon muhasebesi etkisinden gelebilir (doğrulama: dipnot)."
+            )
+            skor -= 1
+        elif npp < 0 and net is not None and net > 0:
+            gelir_yorum.append(
+                "Operasyonel net kâr pozitif; parasal pozisyon negatif — "
+                "enflasyon etkisi kârı baskılamış olabilir."
+            )
+        try:
+            _ea = npp_etki_analizi({"ozet": oz, "oranlar": oran})
+            if _ea.get("net_npp_haric") is not None:
+                gelir_yorum.append(
+                    f"NPP hariç yaklaşık net **{tr_num(_ea['net_npp_haric'], 0)}** ₺ "
+                    f"(NPP/net ≈ %{tr_num(_ea.get('npp_net_orani_%'), 1) if _ea.get('npp_net_orani_%') is not None else '—'})."
+                )
+        except Exception:
+            pass
 
     # Nakit akım
     if op_cf is not None:
@@ -4400,6 +5253,8 @@ def mali_tablolar_ileri_analiz(isy: dict | None, deg: dict | None = None) -> dic
         "gelir": gelir_yorum or ["Gelir kalemi sınırlı."],
         "nakit": nakit_yorum or ["Nakit akım satırı sınırlı — KAP dipnot önerilir."],
         "fcf": fcf,
+        "net_parasal_pozisyon": npp,
+        "net_parasal_pozisyon_yoy": npp_yoy,
         "donem_sonu_nakit": nakit,
         "nakit_pd_pct": round(nakit_pd, 2) if nakit_pd is not None else None,
         "fcf_pd_pct": round(fcf_pd, 2) if fcf_pd is not None else None,
@@ -4872,11 +5727,50 @@ def show_df(df: pd.DataFrame, cols: list, height: int = 420):
     if df is None or df.empty:
         st.info("Gösterilecek veri yok.")
         return
-    use = [c for c in cols if c in df.columns]
+    # Yinelenen kolon adlarını tekilleştir (pyarrow hatası önlemi)
+    seen = set()
+    use = []
+    for c in cols:
+        if c in df.columns and c not in seen:
+            use.append(c)
+            seen.add(c)
     if not use:
-        st.dataframe(df, use_container_width=True, height=height)
+        # df kendi içinde de duplicate olabilir
+        view = df.loc[:, ~df.columns.duplicated()].copy()
+        st.dataframe(view, use_container_width=True, height=height)
         return
-    view = df[use].copy()
+    view = df.loc[:, ~df.columns.duplicated()][use].copy()
+    # Büyük tutar / skor kolonları — TR ondalık biçim (string)
+    _big = {
+        "net_parasal_pozisyon", "net_parasal_onceki", "net_kar", "net_npp_haric",
+        "hasilat", "ozkaynak", "npp", "piyasa_degeri", "değer", "deger",
+    }
+    for c in list(view.columns):
+        cl = str(c).lower()
+        if c in _big or any(x in cl for x in ("parasal", "npp_haric", "net_kar", "hasilat")):
+            try:
+                view[c] = view[c].map(
+                    lambda v: "—" if v is None or (isinstance(v, float) and v != v)
+                    else (tr_num(float(v), 0) if abs(float(v)) >= 1 else tr_num(float(v), 2))
+                )
+            except Exception:
+                pass
+        elif cl in ("roe", "roe_npp_haric", "net_marj_npp_haric_%", "net_marj_%") or cl.endswith("_%"):
+            try:
+                view[c] = view[c].map(
+                    lambda v: "—" if v is None or (isinstance(v, float) and v != v)
+                    else tr_num(float(v), 2)
+                )
+            except Exception:
+                pass
+        elif c in ("F/K", "F/K_npp_haric", "PD/DD"):
+            try:
+                view[c] = view[c].map(
+                    lambda v: "—" if v is None or (isinstance(v, float) and v != v)
+                    else tr_num(float(v), 2)
+                )
+            except Exception:
+                pass
     pct_cols = {
         "getiri_1a", "getiri_3a", "getiri_6a", "getiri_1y", "getiri_3y",
         "reel_1y", "vs_mevduat", "vs_bist100", "vs_altin",
@@ -4909,13 +5803,41 @@ def show_df(df: pd.DataFrame, cols: list, height: int = 420):
     )
 
 
+def tefas_raporlar_dir() -> Path:
+    """İndirilen / üretilen raporların klasörü: tefas_raporlar"""
+    d = Path(__file__).resolve().parent / "tefas_raporlar"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        d = Path.cwd() / "tefas_raporlar"
+        d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def kaydet_rapor_dosyasi(data: bytes, filename: str) -> Path | None:
+    """Her türlü rapor dosyasını tefas_raporlar/ altına yazar."""
+    if not data:
+        return None
+    try:
+        safe = Path(str(filename)).name.replace("..", "_")
+        path = tefas_raporlar_dir() / safe
+        path.write_bytes(data)
+        return path
+    except Exception as e:
+        try:
+            st.warning(f"Rapor klasörüne yazılamadı: {e}")
+        except Exception:
+            pass
+        return None
+
+
 def save_excel_to_disk(df: pd.DataFrame, filename: str, meta: dict = None) -> Path | None:
-    """Sonuçları programa ait klasöre Excel olarak yazar."""
+    """Sonuçları tefas_raporlar/ klasörüne Excel olarak yazar."""
     if df is None or df.empty:
         return None
-    path = ROOT / filename
+    safe = Path(str(filename)).name
+    path = tefas_raporlar_dir() / safe
     try:
-        # core.excel_kaydet varsa onu kullan (daha zengin format)
         core.excel_kaydet(df, str(path), meta=meta)
         return path
     except Exception:
@@ -4928,6 +5850,52 @@ def save_excel_to_disk(df: pd.DataFrame, filename: str, meta: dict = None) -> Pa
             return None
 
 
+
+def _portfoy_path() -> Path:
+    d = Path(__file__).resolve().parent / "panel_data"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "sanal_portfoy.json"
+
+
+def load_sanal_portfoy() -> dict:
+    p = _portfoy_path()
+    default = {
+        "ad": "Portföyüm", "nakit": 0.0, "pozisyonlar": {}, "lotlar": [], "islemler": [], "kaynak": None,
+    }
+    try:
+        if p.exists():
+            import json
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("pozisyonlar"), dict):
+                default.update({k: data[k] for k in data if k in default or k in ("pozisyonlar", "lotlar", "ad", "nakit", "kaynak")})
+                default["pozisyonlar"] = {str(k).upper(): v for k, v in (data.get("pozisyonlar") or {}).items()}
+                return default
+    except Exception:
+        pass
+    return default
+
+
+def save_sanal_portfoy(sp: dict) -> None:
+    try:
+        import json
+        p = _portfoy_path()
+        payload = {
+            "ad": sp.get("ad") or "Portföyüm",
+            "nakit": float(sp.get("nakit") or 0),
+            "pozisyonlar": sp.get("pozisyonlar") or {},
+            "lotlar": sp.get("lotlar") or [],
+            "islemler": sp.get("islemler") or [],
+            "kaynak": sp.get("kaynak"),
+            "kaydedildi": datetime.now().isoformat(timespec="seconds"),
+        }
+        p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        try:
+            st.warning(f"Portföy kaydı yazılamadı: {e}")
+        except Exception:
+            pass
+
+
 def download_excel_button(df: pd.DataFrame, filename: str, meta: dict = None, key: str = "xl", auto_save: bool = True):
     """Hem indirme butonu gösterir hem (isteğe bağlı) diske kaydeder."""
     if df is None or df.empty:
@@ -4935,7 +5903,7 @@ def download_excel_button(df: pd.DataFrame, filename: str, meta: dict = None, ke
     if auto_save:
         saved = save_excel_to_disk(df, filename, meta)
         if saved:
-            st.success(f"💾 Excel kaydedildi: `{saved}`")
+            st.success(f"💾 tefas_raporlar / {getattr(saved, 'name', saved)}")
     data = df_to_excel_bytes(df, meta)
     st.download_button(
         "📥 Excel indir",
@@ -7394,11 +8362,11 @@ elif sayfa == "🧪 Filtre Stüdyosu":
     st.markdown("---")
     st.markdown("### Hazır profil — birleşik skor + filtre")
     st.caption(
-        "**Dengeli** · **Değer** (F/K≤15) · **Kalite** · **Momentum** · **Taze bilanço**. Tavsiye değildir."
+        "**Dengeli** · **Değer** · **Kalite** · **Momentum** · **Taze bilanço** · **Enflasyon düzeltilmiş değer** (NPP hariç kâr/ROE/F/K). Tavsiye değildir."
     )
     fs_prof = st.radio(
         "Hazır profil",
-        ["Dengeli", "Değer", "Kalite", "Momentum", "Taze bilanço", "Düşük kaldıraç"],
+        ["Dengeli", "Değer", "Kalite", "Momentum", "Taze bilanço", "Düşük kaldıraç", "Enflasyon düzeltilmiş değer"],
         horizontal=True,
         key="fs_hazir_profil",
     )
@@ -7425,14 +8393,17 @@ elif sayfa == "🧪 Filtre Stüdyosu":
         st.session_state["fs_birlesik_profil"] = fs_prof
     dfb = st.session_state.get("fs_birlesik_df")
     if dfb is not None and not getattr(dfb, "empty", True):
-        show_cols = [
-            c for c in (
-                "kod", "ad", "bilanco_donem", "kalite_skor", "model_sinyal",
-                "sinyal_norm", "ucuzluk_skor", "fiyat_persentil_1y",
-                "birlesik_ortalama", "seviye",
-                "F/K", "PD/DD", "ROE", "getiri_1y",
-            ) if c in dfb.columns
-        ]
+        _col_pref = (
+            "kod", "ad", "bilanco_donem",
+            "net_parasal_pozisyon", "net_kar", "net_npp_haric",
+            "ROE", "ROE_npp_haric", "net_marj_npp_haric_%",
+            "F/K", "F/K_npp_haric", "PD/DD",
+            "deger_skor_npp_haric", "deger_skor_rapor",
+            "kalite_skor", "model_sinyal", "sinyal_norm",
+            "ucuzluk_skor", "fiyat_persentil_1y",
+            "birlesik_ortalama", "seviye", "getiri_1y",
+        )
+        show_cols = list(dict.fromkeys([c for c in _col_pref if c in dfb.columns]))
         show_df(dfb, show_cols, height=360)
         download_excel_button(
             dfb[show_cols] if show_cols else dfb,
@@ -7529,6 +8500,16 @@ elif sayfa == "⚖️ Karşılaştırma":
                         orans = isy.get("oranlar") or {}
                         if orans.get("ROE_%") is not None:
                             row["ROE"] = orans["ROE_%"]
+                        oz = isy.get("ozet") or {}
+                        npp = oz.get("net_parasal_pozisyon") or {}
+                        if isinstance(npp, dict) and npp.get("deger") is not None:
+                            row["net_parasal_pozisyon"] = npp.get("deger")
+                            row["net_parasal_onceki"] = npp.get("onceki_yoy")
+                        elif orans.get("net_parasal_pozisyon") is not None:
+                            row["net_parasal_pozisyon"] = orans.get("net_parasal_pozisyon")
+                            row["net_parasal_onceki"] = orans.get("net_parasal_pozisyon_yoy")
+                        if (oz.get("net_donem_kari") or {}).get("deger") is not None:
+                            row["net_kar"] = (oz.get("net_donem_kari") or {}).get("deger")
                         kal = bilanco_kalite_skoru(isy, {"F/K": row["F/K"], "PD/DD": row["PD/DD"], "ROE": row["ROE"]})
                         row["kalite_skor"] = kal.get("skor")
                         sig = model_sinyal_skoru(
@@ -7549,7 +8530,8 @@ elif sayfa == "⚖️ Karşılaştırma":
         cols = [
             "tur", "kod", "ad", "bilanco_donem", "fiyat",
             "getiri_1a", "getiri_3a", "getiri_1y", "volatilite", "max_drawdown", "sharpe",
-            "F/K", "PD/DD", "ROE", "kalite_skor", "model_sinyal", "risk",
+            "F/K", "PD/DD", "ROE", "net_parasal_pozisyon", "net_parasal_onceki", "net_kar",
+            "kalite_skor", "model_sinyal", "risk",
         ]
         show_df(df, cols, height=380)
         download_excel_button(
@@ -8434,14 +9416,7 @@ elif sayfa == "💼 Portföyüm":
 
 
     if "sanal_portfoy" not in st.session_state:
-        st.session_state.sanal_portfoy = {
-            "ad": "Portföyüm",
-            "nakit": 0.0,
-            "pozisyonlar": {},
-            "lotlar": [],
-            "islemler": [],
-            "kaynak": None,
-        }
+        st.session_state.sanal_portfoy = load_sanal_portfoy()
     sp = st.session_state.sanal_portfoy
 
     st.markdown(
@@ -8477,6 +9452,7 @@ elif sayfa == "💼 Portföyüm":
         return out
 
     st.markdown("##### Portföye ekle")
+    st.caption(f"Kayıt dosyası: `panel_data/sanal_portfoy.json` — yenilemede silinmez.")
     _c_fon, _c_his = st.columns(2)
     with _c_fon:
         st.markdown("**💰 Fon (TEFAS)**")
@@ -8493,6 +9469,7 @@ elif sayfa == "💼 Portföyüm":
                 poz2[k] = {"adet": 1000.0, "maliyet": px, "ad": k, "tur": "FON"}
             sp["pozisyonlar"] = poz2
             st.session_state.sanal_portfoy = sp
+            save_sanal_portfoy(sp)
             st.success(f"Fon eklendi: {', '.join(kodlar)}")
             st.rerun()
     with _c_his:
@@ -8510,6 +9487,7 @@ elif sayfa == "💼 Portföyüm":
                 poz2[k] = {"adet": 100.0, "maliyet": px, "ad": k, "tur": "HISSE"}
             sp["pozisyonlar"] = poz2
             st.session_state.sanal_portfoy = sp
+            save_sanal_portfoy(sp)
             st.success(f"Hisse eklendi: {', '.join(kodlar)}")
             st.rerun()
     st.markdown("---")
@@ -8611,6 +9589,7 @@ elif sayfa == "💼 Portföyüm":
                 sp["kaynak"] = up.name
                 sp["nakit"] = 0.0
                 st.session_state.sanal_portfoy = sp
+                save_sanal_portfoy(sp)
                 # sepete de yansıt
                 sepet = [{"kod": k, "ad": v.get("ad") or k, "kaynak": "excel"} for k, v in data["pozisyonlar"].items()]
                 st.session_state.portfoy_sepet = sepet
@@ -8674,6 +9653,7 @@ elif sayfa == "💼 Portföyüm":
                     }
                 sp["pozisyonlar"] = poz2
                 st.session_state.sanal_portfoy = sp
+                save_sanal_portfoy(sp)
                 st.session_state.portfoy_sepet = [
                     {"kod": k, "ad": v.get("ad") or k, "kaynak": "manuel"} for k, v in poz2.items()
                 ]
@@ -8697,6 +9677,7 @@ elif sayfa == "💼 Portföyüm":
                     poz2[k] = {"adet": 1000.0, "maliyet": px, "ad": k, "tur": "FON"}
                 sp["pozisyonlar"] = poz2
                 st.session_state.sanal_portfoy = sp
+                save_sanal_portfoy(sp)
                 st.success(f"{len(kodlar)} fon işlendi")
                 st.rerun()
         with ch:
@@ -8714,6 +9695,7 @@ elif sayfa == "💼 Portföyüm":
                     poz2[k] = {"adet": 100.0, "maliyet": px, "ad": k, "tur": "HISSE"}
                 sp["pozisyonlar"] = poz2
                 st.session_state.sanal_portfoy = sp
+                save_sanal_portfoy(sp)
                 st.success(f"{len(kodlar)} hisse işlendi")
                 st.rerun()
 
@@ -8721,6 +9703,7 @@ elif sayfa == "💼 Portföyüm":
             st.session_state.sanal_portfoy = {
                 "ad": "Portföyüm", "nakit": 0.0, "pozisyonlar": {}, "lotlar": [], "islemler": [], "kaynak": None,
             }
+            save_sanal_portfoy(st.session_state.sanal_portfoy)
             st.rerun()
 
     poz = dict(sp.get("pozisyonlar") or {})
@@ -9779,9 +10762,13 @@ elif sayfa == "💼 Portföyüm":
                                 },
                             )
                             st.session_state["_fy_hs_html"] = html
+                            _hb = html.encode("utf-8")
+                            _hp = kaydet_rapor_dosyasi(_hb, f"portfoy_hisse_rapor_{datetime.now().strftime('%Y%m%d_%H%M')}.html")
+                            if _hp:
+                                st.caption(f"💾 Kaydedildi: `{_hp}`")
                             st.download_button(
                                 "HTML indir",
-                                html.encode("utf-8"),
+                                _hb,
                                 file_name=f"portfoy_hisse_rapor_{datetime.now().strftime('%Y%m%d_%H%M')}.html",
                                 mime="text/html",
                                 key="dl_fy_hs_html",
@@ -9969,6 +10956,7 @@ elif sayfa == "💼 Portföyüm":
                     }
                 sp["pozisyonlar"] = poz2
                 st.session_state.sanal_portfoy = sp
+                save_sanal_portfoy(sp)
                 st.success("Eşit ağırlık uygulandı (takip tutarı korundu).")
                 st.rerun()
 
@@ -10362,6 +11350,39 @@ elif sayfa == "🔎 Fon Detay":
         }
         st.json({k: v for k, v in more.items() if v is not None})
 
+        # SWOT + AL/TUT/SAT + sözlük
+        st.markdown("#### 🤖 Fon model karar · AL / TUT / SAT + SWOT")
+        try:
+            _fkar = fon_swot_al_tut_sat(m, profil=p, liq=liq, an=an)
+            det["fon_karar"] = _fkar
+            k1, k2, k3 = st.columns(3)
+            k1.metric("Karar", _fkar.get("karar") or "—")
+            k2.metric("Model skor", f"{_fkar.get('skor')}")
+            k3.metric("1Y / Sharpe", f"{fmt_num(m.get('getiri_1y'))} / {fmt_num(m.get('sharpe'), 2)}")
+            if _fkar.get("karar") == "AL":
+                st.success(_fkar.get("karar_tr") or "")
+            elif _fkar.get("karar") == "SAT":
+                st.error(_fkar.get("karar_tr") or "")
+            else:
+                st.warning(_fkar.get("karar_tr") or "")
+            for t in _fkar.get("tavsiye") or []:
+                st.markdown(f"- {t}")
+            s1, s2 = st.columns(2)
+            with s1:
+                st.markdown("**Strengths / Opportunities**")
+                for x in (_fkar.get("S") or []) + (_fkar.get("O") or []):
+                    st.markdown(f"- {x}")
+            with s2:
+                st.markdown("**Weaknesses / Threats**")
+                for x in (_fkar.get("W") or []) + (_fkar.get("T") or []):
+                    st.markdown(f"- {x}")
+            with st.expander("Rakamlar ne anlama geliyor?", expanded=False):
+                for ad_, val_, acik in _fkar.get("sozluk") or []:
+                    st.markdown(f"- **{ad_}** (`{val_ if val_ is not None else '—'}`): {acik}")
+            st.caption(_fkar.get("disclaimer") or "")
+        except Exception as _fe:
+            st.caption(f"Fon karar: {_fe}")
+
         # Portföy dağılımı (detay ekranı)
         try:
             analiz_d = get_analiz()
@@ -10488,6 +11509,21 @@ elif sayfa == "🔎 Fon Detay":
                         ekstra_metrikler=ek_m, dagilim=dagilim_fon,
                     )
             if path:
+                # SWOT / AL-TUT-SAT bloğunu HTML sonuna ekle
+                try:
+                    _fkar = det.get("fon_karar") or fon_swot_al_tut_sat(m, profil=p, liq=liq, an=an)
+                    html0 = Path(path).read_text(encoding="utf-8")
+                    blog = fon_karar_html_blogu(_fkar)
+                    if "</body>" in html0:
+                        html0 = html0.replace("</body>", blog + "\n</body>", 1)
+                    else:
+                        html0 = html0 + blog
+                    Path(path).write_text(html0, encoding="utf-8")
+                    _saved = kaydet_rapor_dosyasi(html0.encode("utf-8"), Path(path).name)
+                    if _saved:
+                        st.caption(f"💾 tefas_raporlar / {_saved.name}")
+                except Exception as _he:
+                    st.caption(f"HTML SWOT ekleme: {_he}")
                 st.success(f"Rapor: {path}")
                 with open(path, "rb") as f:
                     st.download_button(
@@ -10774,12 +11810,12 @@ elif sayfa == "🏦 BIST Değerleme":
 
     st.markdown("#### Hazır profil — birleşik skor + filtre")
     st.caption(
-        "**Dengeli** · **Değer** (F/K≤15) · **Kalite** (≥55) · **Momentum** · **Taze bilanço**. "
+        "**Dengeli** · **Değer** · **Kalite** · **Momentum** · **Taze bilanço** · **Enflasyon düzeltilmiş değer** (NPP hariç). "
         "Kalite+sinyal+ucuzluk eşit ağırlık. Tavsiye değildir."
     )
     bist_prof = st.radio(
         "Hazır profil",
-        ["Dengeli", "Değer", "Kalite", "Momentum", "Taze bilanço", "Düşük kaldıraç"],
+        ["Dengeli", "Değer", "Kalite", "Momentum", "Taze bilanço", "Düşük kaldıraç", "Enflasyon düzeltilmiş değer"],
         horizontal=True,
         key="bist_hazir_profil",
     )
@@ -10806,14 +11842,17 @@ elif sayfa == "🏦 BIST Değerleme":
         st.session_state["bist_birlesik_profil"] = bist_prof
     dfb = st.session_state.get("bist_birlesik_df")
     if dfb is not None and not getattr(dfb, "empty", True):
-        show_cols = [
-            c for c in (
-                "kod", "ad", "bilanco_donem", "kalite_skor", "model_sinyal",
-                "sinyal_norm", "ucuzluk_skor", "fiyat_persentil_1y",
-                "birlesik_ortalama", "seviye",
-                "F/K", "PD/DD", "ROE", "getiri_1y",
-            ) if c in dfb.columns
-        ]
+        _col_pref = (
+            "kod", "ad", "bilanco_donem",
+            "net_parasal_pozisyon", "net_kar", "net_npp_haric",
+            "ROE", "ROE_npp_haric", "net_marj_npp_haric_%",
+            "F/K", "F/K_npp_haric", "PD/DD",
+            "deger_skor_npp_haric", "deger_skor_rapor",
+            "kalite_skor", "model_sinyal", "sinyal_norm",
+            "ucuzluk_skor", "fiyat_persentil_1y",
+            "birlesik_ortalama", "seviye", "getiri_1y",
+        )
+        show_cols = list(dict.fromkeys([c for c in _col_pref if c in dfb.columns]))
         show_df(dfb, show_cols, height=360)
         download_excel_button(
             dfb[show_cols] if show_cols else dfb,
@@ -12284,10 +13323,24 @@ elif sayfa == "🔎 Hisse Detay":
                     )
                 if orans:
                     st.markdown("**İş Yatırım kalemlerinden oranlar (güncel dönem)**")
+                    _odf = oranlar_tablo_df(orans)
                     st.dataframe(
-                        pd.DataFrame([{"Oran": k, "Değer": v} for k, v in orans.items()]),
+                        _odf[["Oran", "Değer"]] if not _odf.empty else _odf,
                         hide_index=True, use_container_width=True,
                     )
+                    # NPP etki özeti
+                    try:
+                        _npp_a = npp_etki_analizi(isy if isinstance(isy, dict) else {"oranlar": orans, "ozet": (isy or {}).get("ozet") if isinstance(isy, dict) else {}})
+                        if _npp_a.get("npp") is not None:
+                            st.markdown("**Net parasal pozisyon etkisi (enflasyon mh.)**")
+                            c1, c2, c3 = st.columns(3)
+                            c1.metric("NPP", format_oran_deger("net_parasal_pozisyon", _npp_a.get("npp")))
+                            c2.metric("Net kâr", format_oran_deger("net", _npp_a.get("net_kar")))
+                            c3.metric("NPP hariç ≈", format_oran_deger("net", _npp_a.get("net_npp_haric")))
+                            for _y in _npp_a.get("yorumlar") or []:
+                                st.caption(_y)
+                    except Exception:
+                        pass
                     # Temel skora İş Yatırım ROE/marj enjekte
                     if orans.get("ROE_%") is not None:
                         deg["ROE"] = orans["ROE_%"]
@@ -12305,11 +13358,22 @@ elif sayfa == "🔎 Hisse Detay":
                 for key, item in oz.items():
                     if not isinstance(item, dict):
                         continue
+                    _dg = item.get("degisim_%")
+                    try:
+                        _dg_s = tr_num(float(_dg), 2) if _dg is not None and str(_dg).lower() != "none" else "—"
+                    except (TypeError, ValueError):
+                        _dg_s = "—"
+                    # Nakit 0 gösterimini bilanço ile düzelt
+                    _deg = item.get("deger")
+                    if key in ("donem_sonu_nakit", "nakit") and (_deg is None or abs(float(_deg or 0)) < 1):
+                        _alt = (oz.get("nakit") or {}).get("deger")
+                        if _alt is not None and abs(float(_alt)) >= 1:
+                            _deg = _alt
                     oz_rows.append({
                         "Kalem": item.get("kalem") or key,
-                        _core_bil.get("gunce_donem") or "Güncel": _tl(item.get("deger")),
+                        _core_bil.get("gunce_donem") or "Güncel": _tl(_deg),
                         "YoY aynı dönem": _tl(item.get("onceki_yoy")),
-                        "Değişim %": item.get("degisim_%"),
+                        "Değişim %": _dg_s,
                     })
                 if oz_rows:
                     st.markdown("**Özet kalemler (YoY)**")
@@ -12447,6 +13511,15 @@ elif sayfa == "🔎 Hisse Detay":
                 st.markdown("---")
                 st.markdown("#### 📊 Bilanço · gelir · nakit akım analizi")
                 try:
+                    # NPP boşsa KAP otomatik dene
+                    try:
+                        _oz0 = (_core_bil.get("ozet") or {}) if isinstance(_core_bil, dict) else {}
+                        _npp0 = (_oz0.get("net_parasal_pozisyon") or {}).get("deger")
+                        if _npp0 is None and isinstance(_core_bil, dict):
+                            _core_bil = mali_tablo_npp_kap_doldur(_core_bil, kod)
+                            det["isy"] = _core_bil
+                    except Exception:
+                        pass
                     _mt_an = mali_tablolar_ileri_analiz(_core_bil, deg)
                     det["mali_ileri_analiz"] = _mt_an
                     a1, a2, a3, a4 = st.columns(4)
@@ -12461,6 +13534,46 @@ elif sayfa == "🔎 Hisse Detay":
                     )
                     _fcf = _mt_an.get("fcf")
                     a4.metric("FCF≈ (₺)", f"{_fcf:,.0f}" if _fcf is not None else "—")
+                    _npp = _mt_an.get("net_parasal_pozisyon")
+                    _npp_y = _mt_an.get("net_parasal_pozisyon_yoy")
+                    n1, n2 = st.columns(2)
+                    n1.metric(
+                        "Net parasal pozisyon (enflasyon mh.)",
+                        f"{_npp:,.0f}" if _npp is not None else "—",
+                    )
+                    n2.metric(
+                        "Önceki dönem parasal poz.",
+                        f"{_npp_y:,.0f}" if _npp_y is not None else "—",
+                    )
+                    if _npp is not None:
+                        _ksrc = (_core_bil.get("npp_kaynak") if isinstance(_core_bil, dict) else None) or "—"
+                        st.info(
+                            f"**Net parasal pozisyon kazanç/(kayıp):** `{_npp:,.0f}` ₺ · kaynak **{_ksrc}**. "
+                            "TMS 29 / enflasyon muhasebesi; operasyonel kârdan ayrı okunmalıdır."
+                        )
+                    with st.expander("KAP bildiriminden net parasal pozisyon çek", expanded=False):
+                        st.caption("Örnek: kap.org.tr/tr/Bildirim/1689107 → id **1689107** (BNTAS).")
+                        _kid = st.text_input("KAP bildirim no", value=str((_core_bil.get("kap_npp") or {}).get("disclosure_id") or ""), key=f"kap_did_{kod}")
+                        if st.button("KAP'tan NPP güncelle / otomatik bul", key=f"kap_npp_btn_{kod}"):
+                            try:
+                                _kid2 = (_kid or "").strip() or None
+                                if not _kid2:
+                                    _auto = kap_bildirim_ids_for_kod(kod) or kap_otomatik_bildirim_ara(kod)
+                                    _kid2 = _auto[0] if _auto else None
+                                _core_bil2 = mali_tablo_npp_kap_doldur(
+                                    dict(_core_bil) if isinstance(_core_bil, dict) else {},
+                                    kod,
+                                    disclosure_id=_kid2,
+                                )
+                                det["isy"] = _core_bil2
+                                st.session_state[f"hisse_det_{kod}"] = det
+                                st.success(
+                                    f"NPP: {_core_bil2.get('ozet', {}).get('net_parasal_pozisyon', {}).get('deger')} "
+                                    f"({_core_bil2.get('npp_kaynak')})"
+                                )
+                                st.rerun()
+                            except Exception as _ke:
+                                st.error(str(_ke))
                     c_b, c_g, c_n = st.columns(3)
                     with c_b:
                         st.markdown("**Bilanço**")
@@ -12487,9 +13600,13 @@ elif sayfa == "🔎 Hisse Detay":
                             deg,
                             _mt_an,
                         )
+                        _hb = html.encode("utf-8")
+                        _hp = kaydet_rapor_dosyasi(_hb, f"kurumsal_rapor_{kod}_{datetime.now().strftime('%Y%m%d')}.html")
+                        if _hp:
+                            st.caption(f"💾 Kaydedildi: `{_hp}`")
                         st.download_button(
                             "HTML indir",
-                            html.encode("utf-8"),
+                            _hb,
                             file_name=f"kurumsal_rapor_{kod}_{datetime.now().strftime('%Y%m%d')}.html",
                             mime="text/html",
                             key=f"dl_kurumsal_{kod}",
