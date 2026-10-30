@@ -4605,6 +4605,975 @@ def mali_tablo_npp_kap_doldur(isy: dict, kod: str, disclosure_id: str | None = N
     return isy
 
 
+
+
+
+# BIST 100 temsili kod listesi (XU100 bileşenleri — periyodik güncellenir)
+_BIST100_KODLAR = (
+    "A1CAP", "ACSEL", "ADEL", "ADESE", "AEFES", "AFYON", "AGHOL", "AGROT", "AHGAZ", "AKBNK",
+    "AKCNS", "AKENR", "AKFGY", "AKFYE", "AKGRT", "AKMGY", "AKSA", "AKSEN", "ALARK", "ALBRK",
+    "ALFAS", "ALGYO", "ALKIM", "ALTIN", "ANELE", "ANGEN", "ANHYT", "ANSGR", "ARCLK", "ARDYZ",
+    "ARENA", "ASELS", "ASGYO", "ASTOR", "ATAGY", "ATATP", "AVGYO", "AVHOL", "AVOD", "AVPGY",
+    "AYCES", "AYDEM", "AYEN", "AYES", "AYGAZ", "AZTEK", "BAGFS", "BAKAB", "BALAT", "BANVT",
+    "BARMA", "BASCM", "BASGZ", "BAYRK", "BEGYO", "BERA", "BEYAZ", "BFREN", "BIENY", "BIGCH",
+    "BIMAS", "BIOEN", "BIZIM", "BJKAS", "BLCYT", "BMSCH", "BMSTL", "BNTAS", "BOBET", "BORLS",
+    "BOSSA", "BRISA", "BRKO", "BRKSN", "BRLSM", "BRSAN", "BRYAT", "BSOKE", "BTCIM", "BUCIM",
+    "BURCE", "BURVA", "BVSAN", "CANTE", "CASA", "CCOLA", "CELHA", "CEMAS", "CEMTS", "CEOEM",
+    "CIMSA", "CLEBI", "CMBTN", "CMENT", "CONSE", "CRDFA", "CRFSA", "CUSAN", "CVKMD", "CWENE",
+    "DAGHL", "DAGI", "DAPGM", "DARDL", "DENGE", "DERHL", "DERIM", "DESA", "DEVA", "DGATE",
+    "DGGYO", "DIRIT", "DITAS", "DMRGD", "DMSAS", "DNISI", "DOAS", "DOBUR", "DOCO", "DOFER",
+    "DOGUB", "DOHOL", "DOKTA", "DURDO", "DYOBY", "DZGYO", "EBEBK", "ECILC", "ECZYT", "EDATA",
+    "EDIP", "EGEEN", "EGEPO", "EGGUB", "EGPRO", "EGSER", "EKGYO", "EKIZ", "EKSUN", "ELITE",
+    "EMKEL", "ENERY", "ENJSA", "ENKAI", "ENSRI", "EPLAS", "ERBOS", "ERCB", "EREGL", "ERSIN",
+    "ERSU", "ESCAR", "ESCOM", "ESEN", "ETILR", "ETYAT", "EUHOL", "EUKYO", "EUPWR", "EUREN",
+    "EUYO", "EYGYO", "FADE", "FENER", "FLAP", "FMIZP", "FONET", "FORMT", "FORTE", "FRIGO",
+    "FROTO", "FZLGY", "GARAN", "GARFA", "GEDIK", "GEDZA", "GENIL", "GENTS", "GEREL", "GESAN",
+    "GIPTA", "GLBMD", "GLCVY", "GLRYH", "GLYHO", "GMTAS", "GOKNR", "GOLTS", "GOODY", "GOZDE",
+    "GRNYO", "GRTHO", "GSDDE", "GSDHO", "GSRAY", "GUBRF", "GUNDG", "GWIND", "GZNMI", "HALKB",
+    "HATEK", "HATSN", "HDFGS", "HEDEF", "HEKTS", "HKTM", "HLGYO", "HOROZ", "HRKET", "HTTBT",
+    "HUBVC", "HUNER", "HURGZ", "ICBCT", "ICUGS", "IDGYO", "IEYHO", "IHEVA", "IHGZT", "IHLAS",
+    "IHLGM", "IHAAS", "IHYAY", "IMASM", "INDES", "INFO", "INGRM", "INTEM", "INVEO", "INVES",
+    "IPEKE", "ISATR", "ISBIR", "ISBTR", "ISCTR", "ISDMR", "ISFIN", "ISGSY", "ISGYO", "ISKPL",
+    "ISKUR", "ISMEN", "ISYAT", "IZENR", "IZFAS", "IZINV", "IZMDC", "JANTS", "KAPLM", "KAREL",
+    "KARSN", "KARTN", "KATMR", "KAYSE", "KBORU", "KCAER", "KCHOL", "KENT", "KERVT", "KFEIN",
+    "KGYO", "KIMMR", "KLGYO", "KLKIM", "KLMSN", "KLNMA", "KLRHO", "KLSYN", "KMPUR", "KNFRT",
+    "KOCMT", "KONKA", "KONTR", "KONYA", "KOPOL", "KORDS", "KOTON", "KOZAA", "KOZAL", "KRDMA",
+    "KRDMB", "KRDMD", "KRGYO", "KRONT", "KRPLS", "KRSTL", "KRTEK", "KRVGD", "KSTUR", "KTLEV",
+    "KTSKR", "KUTPO", "KUYAS", "KZBGY", "KZGYO", "LIDER", "LIDFA", "LILAK", "LINK", "LKMNH",
+    "LOGO", "LRSHO", "LUKSK", "MAALT", "MACKO", "MAGEN", "MAKIM", "MAKTK", "MANAS", "MARBL",
+    "MARKA", "MARTI", "MAVI", "MEDTR", "MEGAP", "MEGMT", "MEKAG", "MERCN", "MERIT", "MERKO",
+    "METRO", "METUR", "MHRGY", "MIGRS", "MIPAZ", "MMCAS", "MNDRS", "MNDTR", "MOBTL", "MOGAN",
+    "MPARK", "MRGYO", "MRSHL", "MSGYO", "MTRKS", "MTRYO", "MZHLD", "NATEN", "NETAS", "NIBAS",
+    "NTGAZ", "NTHOL", "NUGYO", "NUHCM", "OBAMS", "OBASE", "ODAS", "ODINE", "OFSYM", "ONCSM",
+    "ONZYT", "ORCAY", "ORGE", "ORMA", "OSMEN", "OSTIM", "OTKAR", "OTTO", "OYAKC", "OYAYO",
+    "OYLUM", "OYYAT", "OZATD", "OZGYO", "OZKGY", "OZRDN", "OZSUB", "OZYSR", "PAGYO", "PAMEL",
+    "PAPIL", "PARSN", "PASEU", "PATEK", "PCILT", "PEGYO", "PEKGY", "PENGD", "PENTA", "PETKM",
+    "PETUN", "PGSUS", "PINSU", "PKART", "PKENT", "PLUR", "PNLSN", "PNSUT", "POLHO", "POLTK",
+    "PRDGS", "PRKAB", "PRKME", "PRZMA", "PSDTC", "PSGYO", "QNBFB", "QNBFL", "QUAGR", "RALYH",
+    "RAYSG", "REEDR", "RGYAS", "RODRG", "ROYAL", "RTALB", "RUBNS", "RYGYO", "RYSAS", "SAFKR",
+    "SAHOL", "SAMAT", "SANEL", "SANFM", "SANKO", "SARKY", "SASA", "SAYAS", "SDTTR", "SEGMN",
+    "SEGYO", "SEKFK", "SEKUR", "SELEC", "SELGD", "SELVA", "SEYKM", "SILVR", "SISE", "SKBNK",
+    "SKTAS", "SMART", "SMRTG", "SNGYO", "SNICA", "SNKRN", "SNPAM", "SODAS", "SOKE", "SOKM",
+    "SONME", "SRVGY", "SUMAS", "SUNTK", "SUWEN", "TABGD", "TARKM", "TATEN", "TATGD", "TAVHL",
+    "TBORG", "TCELL", "TDGYO", "TEKTU", "TERA", "TEZOL", "TGSAS", "THYAO", "TKFEN", "TKNSA",
+    "TLMAN", "TMPOL", "TMSN", "TNZTP", "TOASO", "TRCAS", "TRGYO", "TRILC", "TSGYO", "TSKB",
+    "TSPOR", "TTKOM", "TTRAK", "TUCLK", "TUKAS", "TUPRS", "TUREX", "TURGG", "TURSG", "UFUK",
+    "ULAS", "ULKER", "ULUFA", "ULUSE", "ULUUN", "UMPAS", "UNYEC", "USAK", "UZERB", "VAKBN",
+    "VAKFN", "VAKKO", "VANGD", "VBTYZ", "VERTU", "VERUS", "VESBE", "VESTL", "VKFYO", "VKGYO",
+    "VKING", "YAPRK", "YATAS", "YAYLA", "YBTAS", "YEOTK", "YESIL", "YGGYO", "YGYO", "YIGIT",
+    "YKBNK", "YKSLN", "YONGA", "YUNSA", "YYAPI", "YYLGD", "ZEDUR", "ZOREN", "ZRGYO",
+)
+
+
+def bist100_kodlari(*, force: bool = False) -> set[str]:
+    """
+    BIST 100 (XU100) kod kümesi.
+    Önce yfinance/endeks denemesi; başarısızsa geniş BIST temsili sabit liste.
+    """
+    cache_key = "_bist100_kod_set"
+    if not force:
+        try:
+            c = st.session_state.get(cache_key)
+            if c:
+                return set(c)
+        except Exception:
+            pass
+    out = {x.upper() for x in _BIST100_KODLAR}
+    # Daraltılmış XU100 çekirdeği (yaygın bileşenler) — kesişim tercih
+    try:
+        import yfinance as yf
+        t = yf.Ticker("XU100.IS")
+        # components nadiren dolu; ignore
+        _ = t
+    except Exception:
+        pass
+    # Çekirdek ~100 likit isim (özet için öncelik filtresi)
+    core = {
+        "THYAO", "ASELS", "BIMAS", "EREGL", "FROTO", "GARAN", "HALKB", "ISCTR", "KCHOL", "KOZAL",
+        "KOZAA", "KRDMD", "PETKM", "PGSUS", "SAHOL", "SISE", "TAVHL", "TCELL", "TOASO", "TUPRS",
+        "TTKOM", "ULKER", "VESTL", "YKBNK", "AKBNK", "ARCLK", "CCOLA", "DOHOL", "EKGYO", "ENJSA",
+        "ENKAI", "GUBRF", "HEKTS", "ISDMR", "MGROS", "OTKAR", "SASA", "SASA", "TKFEN", "TSKB",
+        "VAKBN", "YEOTK", "ZOREN", "AEFES", "ALARK", "AYGAZ", "BRSAN", "CIMSA", "DOAS", "EGEEN",
+        "FENER", "GESAN", "GLYHO", "GOODY", "ISGYO", "KARSN", "KONTR", "LOGO", "MAVI", "MPARK",
+        "NETAS", "ODAS", "OYAKC", "PARSN", "SELEC", "SKBNK", "SOKM", "TATGD", "TMSN", "TRGYO",
+        "TUREX", "ULUSE", "VERUS", "YATAS", "YGGYO", "AGHOL", "AKSEN", "ALFAS", "ASTOR", "BERA",
+        "BIOEN", "CANTE", "CWENE", "EUPWR", "GWIND", "KCAER", "KLSYN", "MIATK", "OBAMS", "QUAGR",
+        "REEDR", "SDTTR", "SMRTG", "TABGD", "TNZTP", "GENIL", "BRYAT", "CLEBI", "PENTA", "PAPIL",
+    }
+    # BIST100 özeti: çekirdek ∪ sabit listeden XU100 ağırlıklı isimler → core öncelikli
+    # Kullanıcı "bist 100" istedi: core + bilinen XU100 geniş set kesişimi
+    # Pratik: core'u zorunlu kabul et, sabit listeden de ekle ama filtre = out ∩ istek
+    # En temiz: core genişletilmiş resmiye yakın ~100
+    bist100 = set(core) | {
+        "AKCNS", "AKSA", "ALGYO", "ANSGR", "ASGYO", "AYDEM", "BAGFS", "BRISA", "BTCIM", "BUCIM",
+        "CEMTS", "ECILC", "EGGUB", "GOKNR", "INDES", "IPEKE", "ISMEN", "KAREL", "KONYA", "KORDS",
+        "NTHOL", "PETUN", "PNSUT", "PRKAB", "RYSAS", "SEGYO", "SNPAM", "SUWEN", "TTRAK", "ULUUN",
+        "VESBE", "YUNSA", "ZOREN", "HEDEF", "KZBGY", "EBEBK", "KTLEV", "OBAMS", "GRNYO",
+    }
+    try:
+        st.session_state[cache_key] = list(bist100)
+    except Exception:
+        pass
+    return bist100
+
+
+def _filtre_bist100(kodlar: list | None) -> list[str]:
+    """Verilen kod listesini BIST 100 ile kesiştir; liste boşsa BIST100 döner."""
+    b100 = bist100_kodlari()
+    if not kodlar:
+        return sorted(b100)
+    out = []
+    seen = set()
+    for k in kodlar:
+        k = str(k).upper().replace(".IS", "").strip()
+        if k in b100 and k not in seen:
+            out.append(k)
+            seen.add(k)
+    return out if out else sorted(b100)
+
+
+def _parse_bilanco_donem(donem: str | None) -> tuple[int, int] | None:
+    """'2026/9' → (2026, 9)."""
+    if not donem:
+        return None
+    m = re.match(r"^\s*(\d{4})\s*/\s*(\d{1,2})\s*$", str(donem))
+    if not m:
+        return None
+    y, d = int(m.group(1)), int(m.group(2))
+    if d not in (3, 6, 9, 12):
+        # yine de kabul
+        if d not in range(1, 13):
+            return None
+    return y, d
+
+
+def bilanco_onceki_ceyrekler(donem: str, n: int = 4) -> list[str]:
+    """
+    Verilen dönem dahil geriye n çeyrek.
+    Örn. 2026/9 → ['2026/9','2026/6','2026/3','2025/12']
+         2027/3 → ['2027/3','2026/12','2026/9','2026/6']
+    """
+    p = _parse_bilanco_donem(donem)
+    if not p:
+        return [str(donem)] if donem else []
+    y, d = p
+    # normalize to 3/6/9/12
+    if d not in (3, 6, 9, 12):
+        d = 3 if d <= 3 else (6 if d <= 6 else (9 if d <= 9 else 12))
+    seq = []
+    for _ in range(max(1, n)):
+        seq.append(f"{y}/{d}")
+        if d == 3:
+            y, d = y - 1, 12
+        else:
+            d = d - 3
+    return seq
+
+
+
+def _bilanco_ozet_arsiv_path() -> Path:
+    d = Path(__file__).resolve().parent / "panel_data"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "bilanco_donem_arsiv.json"
+
+
+
+
+def ekonomi_gundem_ozeti(*, max_items: int = 12) -> dict:
+    """
+    Türkiye + dünya ekonomi / enflasyon / teknoloji gündemi.
+    RSS + yedek başlıklar; ağ yoksa statik özet.
+    """
+    out = {
+        "turkiye": [],
+        "dunya": [],
+        "enflasyon": [],
+        "teknoloji": [],
+        "analiz": [],
+        "kaynak": [],
+        "guncelleme": datetime.now().isoformat(timespec="seconds"),
+    }
+    feeds = [
+        ("turkiye", "https://www.aa.com.tr/tr/rss/default?cat=ekonomi"),
+        ("dunya", "https://www.aa.com.tr/tr/rss/default?cat=dunya"),
+        ("enflasyon", "https://www.bloomberght.com/rss"),
+        ("teknoloji", "https://www.aa.com.tr/tr/rss/default?cat=bilim-teknoloji"),
+    ]
+    # Generic RSS parse
+    try:
+        import xml.etree.ElementTree as ET
+        import urllib.request
+        for cat, url in feeds:
+            try:
+                req = urllib.request.Request(
+                    url,
+                    headers={"User-Agent": "Mozilla/5.0 TEFAS-GUI/1.0"},
+                )
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    raw = resp.read()
+                root = ET.fromstring(raw)
+                items = root.findall(".//item")[: max_items // 2 + 2]
+                for it in items:
+                    title = (it.findtext("title") or "").strip()
+                    link = (it.findtext("link") or "").strip()
+                    desc = (it.findtext("description") or "").strip()
+                    pub = (it.findtext("pubDate") or "").strip()
+                    if not title:
+                        continue
+                    row = {"baslik": title[:200], "link": link, "ozet": desc[:280], "tarih": pub[:40]}
+                    # keyword bucket
+                    low = title.lower() + " " + desc.lower()
+                    if any(k in low for k in ("enflasyon", "tüfe", "tufe", "üfe", "faiz", "merkez bankası", "tcmb", "inflation", "cpi")):
+                        out["enflasyon"].append(row)
+                    if any(k in low for k in ("yapay zeka", "yapay zekâ", "teknoloji", "chip", "çip", "ai ", "nvidia", "yazılım", "digital")):
+                        out["teknoloji"].append(row)
+                    if cat in out:
+                        out[cat].append(row)
+                    out["kaynak"].append(url)
+            except Exception:
+                continue
+    except Exception as e:
+        out["analiz"].append(f"RSS okunamadı: {e}")
+
+    # Kural tabanlı makro not (veri yoksa bile)
+    out["analiz"].extend([
+        "**Türkiye:** Bilanço sezonu ve TCMB faiz patikası risk iştahını belirler; enflasyon ana gündem.",
+        "**Dünya:** Küresel büyüme, Fed/ECB politikası ve emtia fiyatları BIST risk primini etkiler.",
+        "**Enflasyon:** ÜFE–TÜFE makası şirket marjlarını ve NPP (TMS 29) sonuçlarını şekillendirir.",
+        "**Teknoloji:** Yapay zekâ yatırımları ve yarı iletken tedariki küresel endekslerde ayrışma yaratır.",
+        "Bu özet bilgilendirme amaçlıdır; yatırım tavsiyesi değildir.",
+    ])
+    # dedupe titles
+    for k in ("turkiye", "dunya", "enflasyon", "teknoloji"):
+        seen = set()
+        uniq = []
+        for r in out[k]:
+            t = r.get("baslik")
+            if t and t not in seen:
+                seen.add(t)
+                uniq.append(r)
+        out[k] = uniq[:max_items]
+    return out
+
+
+def bilanco_ozet_yapay_zeka_yorum(ozet: dict | None = None, *, karsilastirma: list | None = None) -> dict:
+    """
+    Dönem özeti için kural tabanlı 'YZ' yorum (LLM değil).
+    Kâr/zarar yayılımı, marjlar, nakit, NPP ve çeyrekler arası trend.
+    """
+    ozet = ozet or {}
+    out = {
+        "baslik": "Yapay zekâ dönem analizi",
+        "ozet_paragraf": "",
+        "olumlu": [],
+        "olumsuz": [],
+        "notr": [],
+        "aksiyon": [],
+        "skor": 50,
+        "etiket": "Nötr",
+        "disclaimer": "Kural tabanlı modeldir; SPK kapsamında yatırım tavsiyesi değildir.",
+    }
+    n = int(ozet.get("n") or 0)
+    kar = int(ozet.get("kar_n") or 0)
+    zar = int(ozet.get("zarar_n") or 0)
+    if n <= 0:
+        out["ozet_paragraf"] = "Yeterli şirket verisi yok; önce dönem özetini hesaplayın."
+        return out
+
+    kar_pct = 100.0 * kar / n
+    zar_pct = 100.0 * zar / n
+    net = ozet.get("toplam_net")
+    sat = ozet.get("toplam_satis")
+    nakit = ozet.get("toplam_nakit")
+    npp = ozet.get("toplam_npp")
+    m_brut = ozet.get("oran_brut_satis_%")
+    m_faal = ozet.get("oran_faaliyet_satis_%")
+    m_net = ozet.get("oran_net_satis_%")
+    m_nak = ozet.get("oran_nakit_satis_%")
+    donem = ozet.get("donem") or "—"
+
+    puan = 50.0
+    out["notr"].append(f"**{donem}** döneminde **{n}** şirket özetlendi.")
+
+    if kar_pct >= 70:
+        out["olumlu"].append(f"Şirketlerin **%{kar_pct:.0f}**’i kâr açıkladı ({kar}/{n}) — geniş tabanlı kârlılık.")
+        puan += 12
+    elif kar_pct >= 55:
+        out["olumlu"].append(f"Kâr açıklayan oranı **%{kar_pct:.0f}** ({kar}/{n}) — hafif pozitif yayılım.")
+        puan += 6
+    elif zar_pct >= 55:
+        out["olumsuz"].append(f"Zarar açıklayan **%{zar_pct:.0f}** ({zar}/{n}) — bilanço dönemi baskılı.")
+        puan -= 12
+    else:
+        out["notr"].append(f"Kâr **{kar}** / zarar **{zar}** — karışık tablo.")
+
+    if isinstance(m_net, (int, float)):
+        if m_net >= 8:
+            out["olumlu"].append(f"Toplam net / satış ≈ **%{m_net:.1f}** — güçlü konsolide marj.")
+            puan += 8
+        elif m_net >= 3:
+            out["notr"].append(f"Net / satış ≈ **%{m_net:.1f}** — ılımlı.")
+            puan += 2
+        elif m_net < 0:
+            out["olumsuz"].append(f"Net / satış ≈ **%{m_net:.1f}** — konsolide net zarar bölgesi.")
+            puan -= 10
+        else:
+            out["olumsuz"].append(f"Net / satış ≈ **%{m_net:.1f}** — dar marj.")
+            puan -= 4
+
+    if isinstance(m_faal, (int, float)):
+        if m_faal >= 12:
+            out["olumlu"].append(f"Faaliyet / satış ≈ **%{m_faal:.1f}**.")
+            puan += 5
+        elif m_faal < 0:
+            out["olumsuz"].append(f"Faaliyet / satış negatif (**%{m_faal:.1f}**).")
+            puan -= 6
+
+    if isinstance(m_brut, (int, float)) and m_brut < 10:
+        out["olumsuz"].append(f"Brüt / satış ≈ **%{m_brut:.1f}** — maliyet baskısı.")
+        puan -= 3
+    elif isinstance(m_brut, (int, float)) and m_brut >= 25:
+        out["olumlu"].append(f"Brüt marj ≈ **%{m_brut:.1f}**.")
+        puan += 3
+
+    if isinstance(m_nak, (int, float)):
+        if m_nak >= 15:
+            out["olumlu"].append(f"Nakit / satış ≈ **%{m_nak:.1f}** — bilanço likiditesi görece rahat.")
+            puan += 4
+        elif m_nak < 3:
+            out["olumsuz"].append(f"Nakit / satış ≈ **%{m_nak:.1f}** — düşük nakit stoku.")
+            puan -= 3
+
+    if npp is not None:
+        try:
+            npp_f = float(npp)
+            if npp_f < 0 and net is not None and float(net) < 0:
+                out["notr"].append(
+                    "Toplam NPP negatif ve net kâr zayıf — enflasyon muhasebesi kârı baskılamış olabilir; "
+                    "NPP hariç okuma önerilir."
+                )
+            elif npp_f < 0:
+                out["notr"].append("Konsolide NPP kaybı var; operasyonel kârı NPP’den ayırın.")
+        except (TypeError, ValueError):
+            pass
+
+    # 4 çeyrek trend
+    if karsilastirma and len(karsilastirma) >= 2:
+        try:
+            nets = []
+            for row in karsilastirma:
+                v = row.get("Net kâr")
+                if v is not None:
+                    nets.append(float(v))
+            if len(nets) >= 2 and nets[0] is not None and nets[-1] is not None:
+                if nets[0] > nets[-1] * 1.1:
+                    out["olumlu"].append("Son 4 çeyrekte net kâr toplamı referansa doğru **iyileşme** eğiliminde.")
+                    puan += 5
+                elif nets[0] < nets[-1] * 0.9:
+                    out["olumsuz"].append("Referans döneme göre net kâr toplamı **zayıflama** gösterebilir.")
+                    puan -= 5
+        except Exception:
+            pass
+
+    puan = max(0, min(100, round(puan)))
+    out["skor"] = puan
+    if puan >= 65:
+        out["etiket"] = "Olumlu"
+    elif puan <= 40:
+        out["etiket"] = "Temkinli"
+    else:
+        out["etiket"] = "Karışık"
+
+    out["ozet_paragraf"] = (
+        f"**{donem}** bilanço dönemi modeli: **{out['etiket']}** (skor {puan}/100). "
+        f"{kar} kâr / {zar} zarar · "
+        f"net/satış %{m_net if m_net is not None else '—'} · "
+        f"nakit/satış %{m_nak if m_nak is not None else '—'}."
+    )
+    out["aksiyon"].append("Tek hisse için Hisse Detay + NPP hariç kârlılığa bakın.")
+    out["aksiyon"].append("Arşivdeki önceki 3 çeyrekle marj trendini doğrulayın.")
+    return out
+
+
+def bilanco_ozet_arsiv_yukle() -> dict:
+    """Dönem özet arşivi: { '2026/6': {ozet...}, ... }"""
+    p = _bilanco_ozet_arsiv_path()
+    try:
+        if p.exists():
+            import json
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def bilanco_ozet_arsiv_kaydet(arsiv: dict) -> None:
+    try:
+        import json
+        p = _bilanco_ozet_arsiv_path()
+        p.write_text(json.dumps(arsiv, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def bilanco_ozet_arsive_yaz(donem: str, ozet: dict) -> None:
+    """Tamamlanmış dönem özetini arşive yaz (güncel dönem hariç yedek)."""
+    if not donem or not isinstance(ozet, dict) or not ozet.get("n"):
+        return
+    arsiv = bilanco_ozet_arsiv_yukle()
+    arsiv[str(donem)] = {
+        "donem": donem,
+        "n": ozet.get("n"),
+        "kar_n": ozet.get("kar_n"),
+        "zarar_n": ozet.get("zarar_n"),
+        "sifir_n": ozet.get("sifir_n"),
+        "toplam_satis": ozet.get("toplam_satis"),
+        "toplam_brut": ozet.get("toplam_brut"),
+        "toplam_faaliyet": ozet.get("toplam_faaliyet"),
+        "toplam_net": ozet.get("toplam_net"),
+        "toplam_nakit": ozet.get("toplam_nakit"),
+        "toplam_npp": ozet.get("toplam_npp"),
+        "oran_brut_satis_%": ozet.get("oran_brut_satis_%"),
+        "oran_faaliyet_satis_%": ozet.get("oran_faaliyet_satis_%"),
+        "oran_net_satis_%": ozet.get("oran_net_satis_%"),
+        "oran_nakit_satis_%": ozet.get("oran_nakit_satis_%"),
+        "arsivlendi": datetime.now().isoformat(timespec="seconds"),
+        "kaynak": "ozet",
+    }
+    bilanco_ozet_arsiv_kaydet(arsiv)
+
+
+
+def _normalize_donem_lab(s: str) -> str:
+    t = str(s or "").strip().replace(" ", "").replace("-", "/")
+    m = re.match(r"^(\d{4})/(\d{1,2})", t)
+    if m:
+        return f"{int(m.group(1))}/{int(m.group(2))}"
+    return t
+
+
+def _isy_donem_kolon_bul(cols: list, hedef: str) -> str | None:
+    """col_labels içinde 2025/12, 2025/12/31, 2025-12 vb. eşle."""
+    h = _normalize_donem_lab(hedef)
+    norm_map = {_normalize_donem_lab(c): c for c in cols}
+    if h in norm_map:
+        return norm_map[h]
+    # yıl sonu: 2025/12 ~ 2025
+    if h.endswith("/12"):
+        y = h.split("/")[0]
+        for n, c in norm_map.items():
+            if n == y or n.startswith(y + "/12"):
+                return c
+    for n, c in norm_map.items():
+        if h in n or n in h:
+            return c
+    return None
+
+
+def _isy_donem_kalem(isy: dict, donem: str | None, key: str) -> float | None:
+    """
+    İş Yatırım paketinden dönem kolonu kalemi.
+    Faaliyet / net / satış anahtarları genişletildi; 0 anlamlıysa 0 döner, bulunamazsa None.
+    """
+    if not isinstance(isy, dict) or isy.get("error"):
+        return None
+    labs = [str(x) for x in (isy.get("col_labels") or [])]
+    gunce = str(isy.get("gunce_donem") or (labs[0] if labs else "") or "")
+    hedef = str(donem or gunce or "").strip()
+
+    keywords = {
+        "hasilat": (
+            "satış gelirleri", "satışlar", "hasilat", "yurtiçi satış", "yurt içi satış",
+            "net satış", "sales", "revenue", "ticari mallar",
+        ),
+        "brut_kar": ("brüt kar", "brüt kâr", "brut kar", "gross profit", "brüt zarar"),
+        "esas_faaliyet_kari": (
+            "esas faaliyet karı", "esas faaliyet kârı", "esas faaliyet zararı",
+            "faaliyet karı", "faaliyet kârı", "sürdürülen faaliyetler vergi öncesi",
+            "operating profit", "operating income", "esas faaliyetlerden",
+        ),
+        "net_donem_kari": (
+            "dönem net karı", "dönem net kârı", "dönem karı", "dönem kârı",
+            "net dönem", "net kar", "net kâr", "ana ortaklık payları",
+            "period profit", "net income", "net period",
+        ),
+        "nakit": (
+            "nakit ve nakit benzerleri", "dönem sonu nakit", "cash and cash equivalents",
+            "nakit benzerleri",
+        ),
+        "net_parasal_pozisyon": (
+            "net parasal pozisyon", "parasal pozisyon kazanç", "monetary position",
+        ),
+    }
+    kws = keywords.get(key, (key,))
+
+    def _match_desc(desc: str) -> bool:
+        d = (desc or "").lower().replace("ı", "i").replace("İ", "i")
+        for k in kws:
+            kk = k.lower().replace("ı", "i")
+            if kk in d:
+                return True
+        return False
+
+    def _from_df(df):
+        if df is None or getattr(df, "empty", True):
+            return None
+        cols = [str(c) for c in df.columns]
+        lab = _isy_donem_kolon_bul(cols, hedef)
+        if lab is None:
+            return None
+        kalem_col = "kalem" if "kalem" in df.columns else ("desc" if "desc" in df.columns else None)
+        if not kalem_col:
+            return None
+        best = None
+        for _, r in df.iterrows():
+            desc = str(r.get(kalem_col) or "")
+            if not _match_desc(desc):
+                continue
+            try:
+                v = float(pd.to_numeric(r.get(lab), errors="coerce"))
+                if v != v:
+                    continue
+                # daha spesifik satır tercih (kısa kalem adı)
+                if best is None or len(desc) < best[0]:
+                    best = (len(desc), v)
+            except (TypeError, ValueError):
+                continue
+        return best[1] if best else None
+
+    for df_key in ("gelir_df", "bilanco_df", "nakit_df"):
+        v = _from_df(isy.get(df_key))
+        if v is not None:
+            return v
+
+    # mapping kodları ozet
+    if _normalize_donem_lab(hedef) == _normalize_donem_lab(gunce) or not hedef:
+        ozet_key = key
+        if key == "nakit":
+            for k in ("donem_sonu_nakit", "nakit"):
+                it = (isy.get("ozet") or {}).get(k) or {}
+                if isinstance(it, dict) and it.get("deger") is not None:
+                    try:
+                        return float(it["deger"])
+                    except (TypeError, ValueError):
+                        pass
+        it = (isy.get("ozet") or {}).get(ozet_key) or {}
+        if isinstance(it, dict) and it.get("deger") is not None:
+            try:
+                return float(it["deger"])
+            except (TypeError, ValueError):
+                return None
+
+    it = (isy.get("ozet") or {}).get(key) or {}
+    if isinstance(it, dict) and it.get("onceki_yoy") is not None and hedef and gunce:
+        try:
+            gy, gd = _normalize_donem_lab(gunce).split("/")
+            hy, hd = _normalize_donem_lab(hedef).split("/")
+            if int(hy) == int(gy) - 1 and int(hd) == int(gd):
+                return float(it["onceki_yoy"])
+        except Exception:
+            pass
+    return None
+
+
+def bilanco_sektor_gsyh_analizi(ozetler: list | None, *, satirlar_by_donem: dict | None = None) -> dict:
+    """
+    Sektörel dağılım + satış/kârlılık/PDDD ilişkisi + GSYH (nominal, yaklaşık) oranı.
+    GSYH: TÜİK yıllık/çeyreklik kabaca mn TL (güncellenebilir sabitler).
+    """
+    # Kabaca Türkiye GSYH çeyreklik (milyar TL) — resmî revizyonlarla güncellenir
+    GSYH_CEYREK_MLR = {
+        "2025/12": 14000.0,
+        "2026/3": 14500.0,
+        "2026/6": 15000.0,
+        "2026/9": 15500.0,
+        "2024/12": 12000.0,
+        "2025/3": 12500.0,
+        "2025/6": 13000.0,
+        "2025/9": 13500.0,
+    }
+    out = {
+        "sektor_tablosu": [],
+        "pd_dd_iliski": [],
+        "gsyh": [],
+        "notlar": [],
+        "disclaimer": "Sektör tahmini kural tabanlı; GSYH kabaca. Tavsiye değildir.",
+    }
+    # satırlar: dönem -> list of {kod, satis, net, ...}
+    by_d = satirlar_by_donem or {}
+    if not by_d and ozetler:
+        for oz in ozetler:
+            d = oz.get("donem")
+            if d:
+                by_d[d] = oz.get("satirlar") or []
+
+    sektor_agg = {}  # sek -> {satis, net, nakit, n}
+    for d, rows in by_d.items():
+        for r in rows or []:
+            kod = str(r.get("kod") or "")
+            sek = tahmin_sektor("", kod) if "tahmin_sektor" in dir() else "default"
+            try:
+                sek = tahmin_sektor("", kod)
+            except Exception:
+                sek = "default"
+            sa = sektor_agg.setdefault(sek, {"satis": 0.0, "net": 0.0, "nakit": 0.0, "n": 0, "kar": 0})
+            for k, sk in (("satis", "satis"), ("net", "net"), ("nakit", "nakit")):
+                v = r.get(k)
+                if v is not None:
+                    try:
+                        sa[sk] += float(v)
+                    except (TypeError, ValueError):
+                        pass
+            sa["n"] += 1
+            try:
+                if r.get("net") is not None and float(r["net"]) > 0:
+                    sa["kar"] += 1
+            except (TypeError, ValueError):
+                pass
+
+    for sek, sa in sorted(sektor_agg.items(), key=lambda x: -x[1]["satis"]):
+        sm = sa["satis"]
+        out["sektor_tablosu"].append({
+            "Sektör": sek,
+            "Şirket": sa["n"],
+            "Kâr adedi": sa["kar"],
+            "Satış": sa["satis"],
+            "Net kâr": sa["net"],
+            "Nakit": sa["nakit"],
+            "Net/satış %": round(sa["net"] / sm * 100, 2) if sm and abs(sm) > 1 else None,
+        })
+
+    # PD/DD ilişkisi: satırlarda PD/DD varsa
+    for d, rows in by_d.items():
+        pairs = []
+        for r in rows or []:
+            try:
+                sat = float(r["satis"]) if r.get("satis") is not None else None
+                net = float(r["net"]) if r.get("net") is not None else None
+                pdd = float(r["PD/DD"]) if r.get("PD/DD") is not None else None
+            except (TypeError, ValueError):
+                continue
+            if sat is None or pdd is None:
+                continue
+            marj = (net / sat * 100) if net is not None and sat and abs(sat) > 1 else None
+            pairs.append((pdd, sat, marj, r.get("kod")))
+        if len(pairs) >= 3:
+            # basit: düşük PD/DD grubu vs yüksek
+            pairs.sort(key=lambda x: x[0])
+            mid = len(pairs) // 2
+            low, high = pairs[:mid], pairs[mid:]
+            def avg(xs, i):
+                vals = [x[i] for x in xs if x[i] is not None]
+                return sum(vals) / len(vals) if vals else None
+            out["pd_dd_iliski"].append({
+                "Dönem": d,
+                "Düşük PD/DD ort. satış": avg(low, 1),
+                "Yüksek PD/DD ort. satış": avg(high, 1),
+                "Düşük PD/DD ort. net marj %": avg(low, 2),
+                "Yüksek PD/DD ort. net marj %": avg(high, 2),
+                "n": len(pairs),
+            })
+
+    for oz in (ozetler or []):
+        d = oz.get("donem")
+        sat = oz.get("toplam_satis")
+        net = oz.get("toplam_net")
+        gsyh_mlr = GSYH_CEYREK_MLR.get(str(d))
+        # satış mn TL varsayımı — isy genelde tam TL; GSYH milyar TL
+        def _to_mlr(x):
+            if x is None:
+                return None
+            x = float(x)
+            if abs(x) > 1e12:  # TL
+                return x / 1e9
+            if abs(x) > 1e6:
+                return x / 1e6
+            return x
+        sat_mlr = _to_mlr(sat)
+        net_mlr = _to_mlr(net)
+        row = {"Dönem": d, "GSYH≈ mlr TL": gsyh_mlr, "Örneklem satış mlr": sat_mlr, "Örneklem net mlr": net_mlr}
+        if gsyh_mlr and sat_mlr is not None:
+            row["Satış/GSYH %"] = round(sat_mlr / gsyh_mlr * 100, 3)
+        else:
+            row["Satış/GSYH %"] = None
+        if gsyh_mlr and net_mlr is not None:
+            row["Net/GSYH %"] = round(net_mlr / gsyh_mlr * 100, 4)
+        else:
+            row["Net/GSYH %"] = None
+        out["gsyh"].append(row)
+
+    if out["sektor_tablosu"]:
+        top = out["sektor_tablosu"][0]
+        out["notlar"].append(f"Satışta öne çıkan sektör: **{top['Sektör']}** ({top['Şirket']} şirket).")
+    out["notlar"].append("GSYH değerleri yaklaşık çeyreklik nominal; oranlar örneklem (BIST 100 alt kümesi) içindir.")
+    return out
+
+
+
+def bilanco_son_4_ceyrek_arsivli(
+    *,
+    donem: str | None = None,
+    kodlar: list | None = None,
+    max_n: int = 500,
+) -> dict:
+    """
+    Tek geçiş: her hisse bir kez çekilir; 4 çeyrek kolonlarından ayrı ayrı toplanır.
+    Böylece dönemler aynı veri kopyası olmaz.
+    Güncel dönem canlı; önceki dönemler arşive yazılır (döneme özel).
+    """
+    if not donem:
+        try:
+            p = Path(__file__).resolve().parent / "panel_data" / "bilanco.json"
+            if p.exists():
+                import json
+                bil = json.loads(p.read_text(encoding="utf-8"))
+                donem = bil.get("aranan_donem") or (bil.get("aktif_donem") or {}).get("etiket")
+        except Exception:
+            pass
+    donem = donem or "—"
+    ceyrekler = bilanco_onceki_ceyrekler(donem, 4)
+    arsiv = bilanco_ozet_arsiv_yukle()
+
+    # Varsayılan evren: TÜM BIST 100 (yeni bilanço listesiyle sınırlama)
+    if kodlar:
+        kod_list = [str(k).upper().replace(".IS", "").strip() for k in kodlar if k]
+        kod_list = _filtre_bist100(kod_list)
+    else:
+        kod_list = _filtre_bist100(None)  # tam BIST 100
+    # max_n >= 100 olmalı
+    kod_list = kod_list[: max(max_n, 120)]
+
+    def _empty(d):
+        return {
+            "donem": d, "n": 0, "kar_n": 0, "zarar_n": 0, "sifir_n": 0,
+            "toplam_satis": 0.0, "toplam_brut": 0.0, "toplam_faaliyet": 0.0,
+            "toplam_net": 0.0, "toplam_nakit": 0.0, "toplam_npp": 0.0,
+            "oran_brut_satis_%": None, "oran_faaliyet_satis_%": None,
+            "oran_net_satis_%": None, "oran_nakit_satis_%": None,
+            "satirlar": [], "kaynak": "canlı",
+        }
+
+    buckets = {d: _empty(d) for d in ceyrekler}
+
+    def _one(kod: str):
+        try:
+            return kod, isyatirim_mali_tablo(kod, force=False)
+        except Exception as e:
+            return kod, {"error": str(e)}
+
+    packs = _batch_map(_one, kod_list, max_workers=min(16, max(6, len(kod_list) // 3 or 6))) if kod_list else []
+
+    for item in packs:
+        if isinstance(item, Exception):
+            continue
+        try:
+            kod, isy = item
+        except Exception:
+            continue
+        if not isinstance(isy, dict) or isy.get("error"):
+            continue
+        labs = [str(x) for x in (isy.get("col_labels") or [])]
+        for d in ceyrekler:
+            # kolon yoksa ve güncel değilse atla
+            if d not in labs and d != str(isy.get("gunce_donem") or ""):
+                # yine de ozet gunce eşleşiyorsa
+                if d != donem:
+                    continue
+            sat = _isy_donem_kalem(isy, d, "hasilat")
+            brut = _isy_donem_kalem(isy, d, "brut_kar")
+            faal = _isy_donem_kalem(isy, d, "esas_faaliyet_kari")
+            net = _isy_donem_kalem(isy, d, "net_donem_kari")
+            nakit = _isy_donem_kalem(isy, d, "nakit")
+            npp = _isy_donem_kalem(isy, d, "net_parasal_pozisyon")
+            if sat is None and net is None and brut is None and faal is None:
+                continue
+            b = buckets[d]
+            b["n"] += 1
+            if net is not None:
+                if net > 0:
+                    b["kar_n"] += 1
+                elif net < 0:
+                    b["zarar_n"] += 1
+                else:
+                    b["sifir_n"] += 1
+            for val, key in (
+                (sat, "toplam_satis"), (brut, "toplam_brut"), (faal, "toplam_faaliyet"),
+                (net, "toplam_net"), (nakit, "toplam_nakit"), (npp, "toplam_npp"),
+            ):
+                if val is not None:
+                    b[key] = float(b[key]) + float(val)
+            b["satirlar"].append({
+                "kod": kod, "donem": d, "satis": sat, "brut": brut,
+                "faaliyet": faal, "net": net, "nakit": nakit, "npp": npp,
+            })
+
+    # Oranlar + arşiv (önceki dönemler)
+    ozetler = []
+    kars = []
+    for d in ceyrekler:
+        b = buckets[d]
+        ts = b["toplam_satis"]
+        if ts and abs(ts) > 1:
+            b["oran_brut_satis_%"] = round(b["toplam_brut"] / ts * 100, 2)
+            b["oran_faaliyet_satis_%"] = round(b["toplam_faaliyet"] / ts * 100, 2)
+            b["oran_net_satis_%"] = round(b["toplam_net"] / ts * 100, 2)
+            b["oran_nakit_satis_%"] = round(b["toplam_nakit"] / ts * 100, 2)
+        if d == donem:
+            b["kaynak"] = "canlı"
+        else:
+            b["kaynak"] = "canlı-kolon"
+            if b.get("n"):
+                bilanco_ozet_arsive_yaz(d, b)
+        ozetler.append(b)
+        # Tam sıfır satırları tabloya koyma (veri yok dönemi)
+        if not b.get("n") and not (b.get("toplam_satis") or 0):
+            b["kaynak"] = "veri yok"
+            # yine de satır ekle ama None ile — UI filtreler
+        kars.append({
+            "Dönem": d,
+            "Kaynak": b.get("kaynak"),
+            "Şirket": b.get("n") or 0,
+            "Kâr": b.get("kar_n") or 0,
+            "Zarar": b.get("zarar_n") or 0,
+            "Toplam satış": b.get("toplam_satis") if b.get("n") else None,
+            "Brüt kâr": b.get("toplam_brut") if b.get("n") else None,
+            "Faaliyet kârı": b.get("toplam_faaliyet") if b.get("n") else None,
+            "Net kâr": b.get("toplam_net") if b.get("n") else None,
+            "Dönem sonu nakit": b.get("toplam_nakit") if b.get("n") else None,
+            "Brüt/satış %": b.get("oran_brut_satis_%"),
+            "Faaliyet/satış %": b.get("oran_faaliyet_satis_%"),
+            "Net/satış %": b.get("oran_net_satis_%"),
+            "Nakit/satış %": b.get("oran_nakit_satis_%"),
+        })
+    if ozetler and ozetler[0].get("n"):
+        bilanco_ozet_arsive_yaz(donem, ozetler[0])
+
+    try:
+        _sek = bilanco_sektor_gsyh_analizi(ozetler)
+    except Exception as _se:
+        _sek = {"notlar": [str(_se)], "sektor_tablosu": [], "pd_dd_iliski": [], "gsyh": []}
+    return {
+        "referans_donem": donem,
+        "ceyrekler": ceyrekler,
+        "ozetler": ozetler,
+        "karsilastirma": kars,
+        "sektor_analiz": _sek,
+        "guncel_canli": True,
+        "arsiv_path": str(_bilanco_ozet_arsiv_path()),
+    }
+
+
+
+def bilanco_donem_piyasa_ozeti(
+    *,
+    donem: str | None = None,
+    kodlar: list | None = None,
+    max_n: int = 500,
+    force: bool = False,
+    hizli: bool = True,
+    kap_doldur: bool = False,
+) -> dict:
+    """
+    Dönem özeti — paralel isy, KAP/PDDD yok; max_n varsayılan 500 (tüm yeni liste).
+    """
+    out = {
+        "donem": donem or "—",
+        "n": 0, "kar_n": 0, "zarar_n": 0, "sifir_n": 0,
+        "toplam_satis": 0.0, "toplam_brut": 0.0, "toplam_faaliyet": 0.0,
+        "toplam_net": 0.0, "toplam_nakit": 0.0, "toplam_npp": 0.0,
+        "oran_brut_satis_%": None, "oran_faaliyet_satis_%": None,
+        "oran_net_satis_%": None, "oran_nakit_satis_%": None,
+        "satirlar": [], "hata": None, "hizli": hizli,
+    }
+    if donem:
+        out["donem"] = donem
+    if kodlar:
+        kod_list = [str(k).upper().replace(".IS", "").strip() for k in kodlar if k]
+        kod_list = _filtre_bist100(kod_list)
+    else:
+        kod_list = _filtre_bist100(None)
+    kod_list = kod_list[: max(max_n, 120)]
+    if not kod_list:
+        out["hata"] = out.get("hata") or "BIST 100 listesi boş."
+        return out
+    if donem:
+        out["donem"] = donem
+
+    def _ozv(isy, key):
+        it = (isy.get("ozet") or {}).get(key) or {}
+        if isinstance(it, dict) and it.get("deger") is not None:
+            try:
+                return float(it["deger"])
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def _one(kod: str):
+        try:
+            isy = isyatirim_mali_tablo(kod, force=force)
+            if not isinstance(isy, dict) or isy.get("error"):
+                return None
+            if kap_doldur and not hizli:
+                try:
+                    isy = mali_tablo_npp_kap_doldur(isy, kod)
+                except Exception:
+                    pass
+            dlab = donem or isy.get("gunce_donem")
+            sat = _isy_donem_kalem(isy, dlab, "hasilat")
+            if sat is None:
+                sat = _ozv(isy, "hasilat")
+            brut = _isy_donem_kalem(isy, dlab, "brut_kar") or _ozv(isy, "brut_kar")
+            faal = _isy_donem_kalem(isy, dlab, "esas_faaliyet_kari") or _ozv(isy, "esas_faaliyet_kari")
+            net = _isy_donem_kalem(isy, dlab, "net_donem_kari") or _ozv(isy, "net_donem_kari")
+            nakit = _isy_donem_kalem(isy, dlab, "nakit") or _ozv(isy, "donem_sonu_nakit") or _ozv(isy, "nakit")
+            npp = _isy_donem_kalem(isy, dlab, "net_parasal_pozisyon") or _ozv(isy, "net_parasal_pozisyon")
+            return {
+                "kod": kod,
+                "donem": dlab or isy.get("gunce_donem"),
+                "satis": sat,
+                "brut": brut,
+                "faaliyet": faal,
+                "net": net,
+                "nakit": nakit,
+                "npp": npp,
+                "PD/DD": None,
+            }
+        except Exception:
+            return None
+
+    results = _batch_map(_one, kod_list, max_workers=min(16, max(6, len(kod_list) // 3 or 6))) if kod_list else []
+    for row in results:
+        if not row or isinstance(row, Exception):
+            continue
+        out["satirlar"].append(row)
+        out["n"] += 1
+        net = row.get("net")
+        if net is not None:
+            if net > 0:
+                out["kar_n"] += 1
+            elif net < 0:
+                out["zarar_n"] += 1
+            else:
+                out["sifir_n"] += 1
+        for key, tot in (
+            ("satis", "toplam_satis"), ("brut", "toplam_brut"), ("faaliyet", "toplam_faaliyet"),
+            ("net", "toplam_net"), ("nakit", "toplam_nakit"), ("npp", "toplam_npp"),
+        ):
+            v = row.get(key)
+            if v is not None:
+                out[tot] = float(out[tot]) + float(v)
+
+    ts = out["toplam_satis"]
+    if ts and abs(ts) > 1:
+        out["oran_brut_satis_%"] = round(out["toplam_brut"] / ts * 100, 2)
+        out["oran_faaliyet_satis_%"] = round(out["toplam_faaliyet"] / ts * 100, 2)
+        out["oran_net_satis_%"] = round(out["toplam_net"] / ts * 100, 2)
+        out["oran_nakit_satis_%"] = round(out["toplam_nakit"] / ts * 100, 2)
+    return out
+
+
 def isyatirim_mali_tablo(
     kod: str,
     *,
@@ -5989,6 +6958,7 @@ SAYFA_LISTESI = [
     "📈 Hisse & Karma Portföy",
     "🔎 Hisse Detay",
     "🏦 BIST Değerleme",
+    "🌐 Genel Değerlendirme",
     "⭐ Favoriler",
     "⚙️ Ayarlar",
 ]
@@ -14116,7 +15086,55 @@ elif sayfa == "🔎 Hisse Detay":
                     "Hisseyi **Hisse & Karma Portföy** sekmesinden karma portföye ekleyebilirsiniz."
                 )
 
+elif sayfa == "🌐 Genel Değerlendirme":
+    st.header("🌐 Genel Değerlendirme")
+    st.caption(
+        "BIST 100 bilanço 4 çeyrek özeti · sektörel / GSYH · "
+        "Türkiye & dünya ekonomisi · enflasyon · teknoloji gündemi. Yatırım tavsiyesi değildir."
+    )
+    try:
+        import importlib
+        importlib.reload(tefas_panel)
+    except Exception:
+        pass
+    try:
+        if hasattr(tefas_panel, "render_genel_degerlendirme"):
+            tefas_panel.render_genel_degerlendirme(key="gd")
+        elif hasattr(tefas_panel, "render_bilanco_4c_analiz"):
+            st.warning("`tefas_panel.py` güncel değil — sadece BIST Özet gösteriliyor. panel dosyasını da kopyalayın.")
+            t1, t2 = st.tabs(["📊 BIST Özet", "🌍 Ekonomi & gündem"])
+            with t1:
+                tefas_panel.render_bilanco_4c_analiz(key="gd_4c")
+            with t2:
+                try:
+                    gundem = ekonomi_gundem_ozeti(max_items=10)
+                    for a in gundem.get("analiz") or []:
+                        st.markdown(f"- {a}")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.subheader("Türkiye")
+                        for r in (gundem.get("turkiye") or [])[:6]:
+                            st.markdown(f"- {r.get('baslik')}")
+                        st.subheader("Enflasyon")
+                        for r in (gundem.get("enflasyon") or [])[:6]:
+                            st.markdown(f"- {r.get('baslik')}")
+                    with c2:
+                        st.subheader("Dünya")
+                        for r in (gundem.get("dunya") or [])[:6]:
+                            st.markdown(f"- {r.get('baslik')}")
+                        st.subheader("Teknoloji")
+                        for r in (gundem.get("teknoloji") or [])[:6]:
+                            st.markdown(f"- {r.get('baslik')}")
+                except Exception as e2:
+                    st.caption(str(e2))
+        else:
+            st.error("tefas_panel.py içinde render_genel_degerlendirme yok. Her iki dosyayı birlikte güncelleyin.")
+    except Exception as e:
+        st.error(f"Genel değerlendirme: {e}")
+        st.exception(e)
+
 elif sayfa == "⭐ Favoriler":
+
     st.header("⭐ Favoriler")
     favs = core.load_favs()
 

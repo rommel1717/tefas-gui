@@ -824,6 +824,20 @@ _PN_CSS = """<style>
 .pn-v{font-weight:700;color:#f1f5f9;line-height:1.15;white-space:nowrap;margin:2px 0 4px}
 .pn-d{display:inline-block;font-weight:600;padding:1px 8px;border-radius:999px;white-space:nowrap;max-width:100%}
 .pn-up{background:#0f3d32;color:#3ddc97}.pn-dn{background:#3d1a1a;color:#ff6b6b}.pn-nt{background:#1e293b;color:#94a3b8}
+.pn-hero{background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 45%,#0f766e 100%);border:1px solid #334155;border-radius:14px;padding:14px 18px;margin:8px 0 12px;box-shadow:0 8px 24px #00000040}
+.pn-hero h3{margin:0 0 4px;font-size:1.05rem;color:#f8fafc;font-weight:700}
+.pn-hero p{margin:0;color:#cbd5e1;font-size:0.82rem;line-height:1.4}
+.pn-chip-row{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 4px;align-items:center}
+.pn-chip{background:#1e293b;border:1px solid #475569;color:#e2e8f0;padding:4px 10px;border-radius:999px;font-size:0.78rem;font-weight:600}
+.pn-chip-on{background:linear-gradient(90deg,#0d9488,#2563eb);border-color:transparent;color:#fff}
+.pn-chip-arrow{color:#64748b;font-size:0.75rem}
+.pn-sec{background:#0f172a99;border:1px solid #334155;border-radius:12px;padding:12px 14px;margin:10px 0 14px}
+.pn-sec-title{font-size:0.9rem;font-weight:700;color:#e2e8f0;margin:0 0 8px}
+.pn-table-wrap{overflow-x:auto;border-radius:10px;border:1px solid #334155}
+.pn-table-wrap table{width:100%;border-collapse:collapse;font-size:0.82rem}
+.pn-table-wrap th{background:#1e293b;color:#94a3b8;text-align:left;padding:8px 10px;font-weight:600;white-space:nowrap}
+.pn-table-wrap td{padding:7px 10px;border-top:1px solid #1e293b;color:#e2e8f0;white-space:nowrap}
+.pn-table-wrap tr:hover td{background:#1e293b66}
 </style>"""
 
 
@@ -936,6 +950,8 @@ def _render(st, key: str) -> None:
     kartlar.append(("Yeni bilanço (45 gün)", str(len(bil.get("yeni") or [])), "", "nt"))
     kartlar.append(("Değerlemesi bekleyen", str(len(bek)), "", "nt"))
     st.markdown(_PN_CSS + _kpi_html(kartlar), unsafe_allow_html=True)
+
+    st.caption("🌐 **Genel Değerlendirme** (4 çeyrek + makro gündem) ayrı sayfada.")
 
     t_bil, t_his, t_fon = st.tabs(["🆕 Yeni bilançolar", "📈 Hisseler", "💰 Fonlar"])
 
@@ -1202,3 +1218,400 @@ border-radius:12px;padding:12px 14px;margin-bottom:8px;min-height:110px;">
                     st.dataframe(_renkle(v, "Değişim %"), hide_index=True, use_container_width=True)
             st.caption(f"{fon.get('taranan', '?')} fon tarandı; fon fiyatları genellikle ertesi sabah netleşir. "
                        "Yatırım tavsiyesi değildir.")
+
+
+
+def render_bilanco_4c_analiz(*, key: str = "b4c") -> None:
+    """Ayrı sayfa: BIST 100 otomatik 4 çeyrek özeti (ana sayfadan taşındı)."""
+    import streamlit as st
+    try:
+        bil = load("bilanco")
+    except Exception:
+        bil = {"yeni": [], "aranan_donem": None, "aktif_donem": {}}
+    # ── Dönem özeti: toplam satış / kâr / nakit + kâr-zarar adedi ──
+    st.markdown(
+        _PN_CSS
+        + """
+<div class="pn-hero">
+  <h3>📊 Bilanço dönemi özeti</h3>
+  <p>Yalnız <b>BIST 100</b> · İş Yatırım · Toplam satış / brüt / faaliyet / net kâr / nakit ·
+  satışa oranlar · kâr–zarar adedi · son 4 çeyrek. Yatırım tavsiyesi değildir.</p>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+    # Referans dönem: veriden otomatik + dropdown (son 4 çeyrek seçili zincir)
+    from collections import Counter
+    _don_auto = bil.get("aranan_donem") or (bil.get("aktif_donem") or {}).get("etiket") or ""
+    _don_counts = Counter(
+        str(e.get("donem") or "") for e in (bil.get("yeni") or []) if e.get("donem")
+    )
+    if not _don_auto and _don_counts:
+        _don_auto = _don_counts.most_common(1)[0][0]
+
+    # Dropdown seçenekleri: otomatik + yeni listeden dönemler + son 8 çeyrek adayı
+    _don_opts = []
+    if _don_auto:
+        _don_opts.append(_don_auto)
+    for d, _n in _don_counts.most_common():
+        if d and d not in _don_opts:
+            _don_opts.append(d)
+    try:
+        import sys
+        _tg0 = sys.modules.get("tefas_gui") or sys.modules.get("__main__")
+        if _tg0 and hasattr(_tg0, "bilanco_onceki_ceyrekler") and _don_auto:
+            for d in _tg0.bilanco_onceki_ceyrekler(_don_auto, 8):
+                if d not in _don_opts:
+                    _don_opts.append(d)
+    except Exception:
+        pass
+    if not _don_opts:
+        _don_opts = ["2026/9", "2026/6", "2026/3", "2025/12"]
+
+    c_oz1, c_oz2, c_oz3 = st.columns([2, 2, 1])
+    with c_oz1:
+        _don_oz = st.selectbox(
+            "Son bilanço dönemi (otomatik 4 çeyrek bu döneme göre)",
+            options=_don_opts,
+            index=0,
+            key=f"{key}_donem_sec",
+            help="Sadece son dönemi seçin; sistem otomatik 4 çeyrek üretir: örn. 2026/9 → 2026/6 → 2026/3 → 2025/12.",
+        )
+    with c_oz2:
+        try:
+            import sys
+            _tg1 = sys.modules.get("tefas_gui") or sys.modules.get("__main__")
+            _zincir = (
+                _tg1.bilanco_onceki_ceyrekler(_don_oz, 4)
+                if _tg1 and hasattr(_tg1, "bilanco_onceki_ceyrekler")
+                else [_don_oz]
+            )
+        except Exception:
+            _zincir = [_don_oz]
+        _chips = []
+        for _i, _d in enumerate(_zincir):
+            _cls = "pn-chip pn-chip-on" if _i == 0 else "pn-chip"
+            _chips.append(f'<span class="{_cls}">{_d}</span>')
+            if _i < len(_zincir) - 1:
+                _chips.append('<span class="pn-chip-arrow">→</span>')
+        st.markdown(
+            '<div class="pn-chip-row">' + "".join(_chips) + "</div>"
+            + f'<p style="color:#94a3b8;font-size:0.8rem;margin:4px 0 0">Kaynak şirket (yeni liste): '
+            + f"<b>{len(bil.get('yeni') or [])}</b></p>",
+            unsafe_allow_html=True,
+        )
+    with c_oz3:
+        _run_oz = st.button("4 çeyrek özet (otomatik)", key=f"{key}_donem_ozet", type="primary")
+    st.caption(
+        "Dropdown’dan referans seçin; özet **otomatik son 4 çeyreği** hesaplar "
+        "(2026/9→6→3→2025/12 · 2027/9→6→3→2026/12)."
+    )
+    _cache_don = st.session_state.get(f"{key}_ozet_donem")
+    if _run_oz or (st.session_state.get(f"{key}_ozet4_cache") and _cache_don == _don_oz):
+        if _run_oz or not st.session_state.get(f"{key}_ozet4_cache") or _cache_don != _don_oz:
+            with st.spinner("Tüm BIST 100 hisseleri · 4 çeyrek…"):
+                try:
+                    import sys
+                    _tg = sys.modules.get("tefas_gui") or sys.modules.get("__main__")
+                    if _tg is None or not hasattr(_tg, "bilanco_son_4_ceyrek_arsivli"):
+                        raise RuntimeError("bilanco_son_4_ceyrek_arsivli bulunamadı")
+                    # Tüm BIST 100 (yeni bilanço listesiyle sınırlama)
+                    _oz4 = _tg.bilanco_son_4_ceyrek_arsivli(
+                        donem=_don_oz or None, kodlar=None, max_n=150
+                    )
+                    st.session_state[f"{key}_ozet4_cache"] = _oz4
+                    st.session_state[f"{key}_ozet4_donem"] = _don_oz
+                    # güncel dilim = ilk özet
+                    _ozet = (_oz4.get("ozetler") or [{}])[0] if _oz4 else {}
+                    st.session_state[f"{key}_ozet_cache"] = _ozet
+                    st.session_state[f"{key}_ozet_donem"] = _don_oz
+                except Exception as _oe:
+                    st.warning(f"Özet: {_oe}")
+                    _ozet = {}
+                    _oz4 = {}
+        else:
+            _ozet = st.session_state.get(f"{key}_ozet_cache") or {}
+            _oz4 = st.session_state.get(f"{key}_ozet4_cache") or {}
+
+        def _tlfmt(x):
+            try:
+                import sys
+                _tg = sys.modules.get("tefas_gui") or sys.modules.get("__main__")
+                if _tg and hasattr(_tg, "_fmt_tl") and x is not None:
+                    return _tg._fmt_tl(x)
+            except Exception:
+                pass
+            try:
+                return f"{float(x):,.0f}".replace(",", ".") if x is not None else "—"
+            except Exception:
+                return "—"
+
+        if _ozet and _ozet.get("n"):
+            st.markdown('<div class="pn-sec"><div class="pn-sec-title">Seçili dönem — özet KPI</div>', unsafe_allow_html=True)
+            _kar_n = int(_ozet.get("kar_n") or 0)
+            _zar_n = int(_ozet.get("zarar_n") or 0)
+            st.markdown(
+                _kpi_html([
+                    ("Şirket", str(_ozet.get("n") or 0), _ozet.get("donem") or "", "nt"),
+                    ("Kâr açıklayan", str(_kar_n), f"%{100*_kar_n/max(int(_ozet.get('n') or 1),1):.0f}", "up"),
+                    ("Zarar açıklayan", str(_zar_n), f"%{100*_zar_n/max(int(_ozet.get('n') or 1),1):.0f}", "dn"),
+                    ("Toplam satış", _tlfmt(_ozet.get("toplam_satis")), "", "nt"),
+                    ("Toplam net kâr", _tlfmt(_ozet.get("toplam_net")), "", "up" if (_ozet.get("toplam_net") or 0) >= 0 else "dn"),
+                ]),
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                _kpi_html([
+                    ("Brüt kâr", _tlfmt(_ozet.get("toplam_brut")), "", "nt"),
+                    ("Faaliyet kârı", _tlfmt(_ozet.get("toplam_faaliyet")), "", "nt"),
+                    ("Dönem sonu nakit", _tlfmt(_ozet.get("toplam_nakit")), "", "nt"),
+                    ("Toplam NPP", _tlfmt(_ozet.get("toplam_npp")), "enflasyon mh.", "dn" if (_ozet.get("toplam_npp") or 0) < 0 else "nt"),
+                ]),
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                _kpi_html([
+                    ("Brüt / satış", f"{_ozet.get('oran_brut_satis_%') if _ozet.get('oran_brut_satis_%') is not None else '—'}%", "", "nt"),
+                    ("Faaliyet / satış", f"{_ozet.get('oran_faaliyet_satis_%') if _ozet.get('oran_faaliyet_satis_%') is not None else '—'}%", "", "nt"),
+                    ("Net / satış", f"{_ozet.get('oran_net_satis_%') if _ozet.get('oran_net_satis_%') is not None else '—'}%", "", "nt"),
+                    ("Nakit / satış", f"{_ozet.get('oran_nakit_satis_%') if _ozet.get('oran_nakit_satis_%') is not None else '—'}%", "", "nt"),
+                ]),
+                unsafe_allow_html=True,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            # Yapay zekâ
+            try:
+                import sys
+                _tg_ai = sys.modules.get("tefas_gui") or sys.modules.get("__main__")
+                if _tg_ai and hasattr(_tg_ai, "bilanco_ozet_yapay_zeka_yorum"):
+                    _aiy = _tg_ai.bilanco_ozet_yapay_zeka_yorum(
+                        _ozet, karsilastirma=(_oz4 or {}).get("karsilastirma")
+                    )
+                    st.markdown(
+                        '<div class="pn-sec"><div class="pn-sec-title">🤖 Yapay zekâ ile dönem analizi</div>',
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown(_aiy.get("ozet_paragraf") or "")
+                    _c1, _c2 = st.columns(2)
+                    with _c1:
+                        if _aiy.get("olumlu"):
+                            st.success("**Olumlu**\n\n" + "\n".join(f"- {x}" for x in _aiy["olumlu"][:6]))
+                        if _aiy.get("notr"):
+                            st.info("**Not**\n\n" + "\n".join(f"- {x}" for x in _aiy["notr"][:4]))
+                    with _c2:
+                        if _aiy.get("olumsuz"):
+                            st.warning("**Risk / temkin**\n\n" + "\n".join(f"- {x}" for x in _aiy["olumsuz"][:6]))
+                        if _aiy.get("aksiyon"):
+                            st.caption(" · ".join(_aiy.get("aksiyon") or []))
+                    st.caption(
+                        f"Model skor: **{_aiy.get('skor')}/100** · {_aiy.get('etiket')} · {_aiy.get('disclaimer')}"
+                    )
+                    st.markdown("</div>", unsafe_allow_html=True)
+            except Exception as _aie:
+                st.caption(f"YZ analiz: {_aie}")
+
+            try:
+                import pandas as _pd
+                _sdf = _pd.DataFrame(_ozet.get("satirlar") or [])
+                if not _sdf.empty and "PD/DD" in _sdf.columns:
+                    _pdd = _pd.to_numeric(_sdf["PD/DD"], errors="coerce").dropna()
+                    if len(_pdd):
+                        st.caption(
+                            f"PD/DD medyan **{_pdd.median():.2f}** · ortalama **{_pdd.mean():.2f}** "
+                            f"({len(_pdd)} şirket)."
+                        )
+                if not _sdf.empty:
+                    with st.expander("Şirket detay (dönem özeti)", expanded=False):
+                        _show = _sdf.copy()
+                        for c in ("satis", "brut", "faaliyet", "net", "nakit", "npp"):
+                            if c in _show.columns:
+                                _show[c] = _show[c].map(lambda v: _tlfmt(v) if v is not None else "—")
+                        st.dataframe(_show, hide_index=True, use_container_width=True, height=280)
+            except Exception:
+                pass
+        elif _ozet.get("hata"):
+            st.caption(_ozet["hata"])
+
+        # Otomatik 4 çeyrek tablosu
+        if _oz4.get("karsilastirma"):
+            _z4 = _oz4.get("ceyrekler") or []
+            _ch4 = []
+            for _i, _d in enumerate(_z4):
+                _ch4.append(f'<span class="pn-chip{" pn-chip-on" if _i==0 else ""}">{_d}</span>')
+                if _i < len(_z4) - 1:
+                    _ch4.append('<span class="pn-chip-arrow">→</span>')
+            st.markdown(
+                '<div class="pn-sec"><div class="pn-sec-title">Otomatik son 4 çeyrek</div>'
+                + f'<div class="pn-chip-row">{"".join(_ch4)}</div>',
+                unsafe_allow_html=True,
+            )
+            try:
+                import pandas as _pd
+                import math
+                _cdf = _pd.DataFrame(_oz4["karsilastirma"])
+                # veri yok satırlarını çıkar
+                if "Şirket" in _cdf.columns:
+                    _cdf = _cdf[_cdf["Şirket"].fillna(0).astype(float) > 0].copy()
+                def _cell_money(v):
+                    if v is None or (isinstance(v, float) and (math.isnan(v) or v == 0 and False)):
+                        return "—"
+                    if v is None:
+                        return "—"
+                    try:
+                        if isinstance(v, float) and math.isnan(v):
+                            return "—"
+                    except Exception:
+                        pass
+                    return _tlfmt(v)
+                def _cell_pct(v):
+                    if v is None:
+                        return "—"
+                    try:
+                        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                            return "—"
+                        return f"{float(v):.2f}".replace(".", ",")
+                    except Exception:
+                        return "—"
+                for col in ("Toplam satış", "Brüt kâr", "Faaliyet kârı", "Net kâr", "Dönem sonu nakit"):
+                    if col in _cdf.columns:
+                        _cdf[col] = _cdf[col].map(_cell_money)
+                for col in ("Brüt/satış %", "Faaliyet/satış %", "Net/satış %", "Nakit/satış %"):
+                    if col in _cdf.columns:
+                        _cdf[col] = _cdf[col].map(_cell_pct)
+                st.markdown(
+                    '<div class="pn-table-wrap">',
+                    unsafe_allow_html=True,
+                )
+                st.dataframe(
+                    _cdf,
+                    hide_index=True,
+                    use_container_width=True,
+                    height=min(280, 56 + 36 * max(len(_cdf), 1)),
+                )
+                st.markdown("</div></div>", unsafe_allow_html=True)
+                # Sektör + GSYH
+                _sek = _oz4.get("sektor_analiz") or {}
+                if _sek.get("sektor_tablosu") or _sek.get("gsyh"):
+                    st.markdown(
+                        '<div class="pn-sec"><div class="pn-sec-title">🏭 Sektörel dağılım · PD/DD · GSYH oranı</div>',
+                        unsafe_allow_html=True,
+                    )
+                    if _sek.get("notlar"):
+                        for _n in _sek["notlar"][:5]:
+                            st.caption(_n)
+                    if _sek.get("sektor_tablosu"):
+                        _sdf = _pd.DataFrame(_sek["sektor_tablosu"])
+                        for c in ("Satış", "Net kâr", "Nakit"):
+                            if c in _sdf.columns:
+                                _sdf[c] = _sdf[c].map(_cell_money)
+                        if "Net/satış %" in _sdf.columns:
+                            _sdf["Net/satış %"] = _sdf["Net/satış %"].map(_cell_pct)
+                        st.markdown("**Sektör kırılımı**")
+                        st.dataframe(_sdf, hide_index=True, use_container_width=True, height=260)
+                    if _sek.get("pd_dd_iliski"):
+                        st.markdown("**Satış / kârlılık · PD/DD ilişkisi**")
+                        _pdf = _pd.DataFrame(_sek["pd_dd_iliski"])
+                        st.dataframe(_pdf, hide_index=True, use_container_width=True)
+                    if _sek.get("gsyh"):
+                        st.markdown("**Örneklem / Türkiye GSYH (yaklaşık çeyreklik)**")
+                        _gdf = _pd.DataFrame(_sek["gsyh"])
+                        st.dataframe(_gdf, hide_index=True, use_container_width=True)
+                        st.caption(_sek.get("disclaimer") or "")
+                    st.markdown("</div>", unsafe_allow_html=True)
+            except Exception as _ce:
+                st.caption(str(_ce))
+
+
+
+
+
+def render_genel_degerlendirme(*, key: str = "gd") -> None:
+    """Genel Değerlendirme: 4Ç BIST100 + Türkiye/dünya ekonomi & enflasyon & teknoloji."""
+    import streamlit as st
+
+    t1, t2 = st.tabs(["📊 BIST Özet", "🌍 Ekonomi & gündem"])
+
+    with t1:
+        try:
+            render_bilanco_4c_analiz(key=f"{key}_4c")
+        except Exception as e:
+            st.warning(f"4Ç: {e}")
+
+    with t2:
+        st.markdown(
+            _PN_CSS
+            + """
+<div class="pn-hero">
+  <h3>🌍 Türkiye & dünya ekonomisi · enflasyon · teknoloji</h3>
+  <p>Güncel haber başlıkları (RSS) + kural tabanlı makro notlar. Yatırım tavsiyesi değildir.</p>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+        if st.button("Gündemi yenile", key=f"{key}_news_refresh"):
+            st.session_state.pop(f"{key}_news", None)
+        news = st.session_state.get(f"{key}_news")
+        if not news:
+            with st.spinner("Ekonomi gündemi çekiliyor…"):
+                try:
+                    import sys
+                    _tg = sys.modules.get("tefas_gui") or sys.modules.get("__main__")
+                    if _tg and hasattr(_tg, "ekonomi_gundem_ozeti"):
+                        news = _tg.ekonomi_gundem_ozeti(max_items=10)
+                    else:
+                        news = {"analiz": ["Modül yüklenemedi."], "turkiye": [], "dunya": [], "enflasyon": [], "teknoloji": []}
+                    st.session_state[f"{key}_news"] = news
+                except Exception as e:
+                    news = {"analiz": [str(e)], "turkiye": [], "dunya": [], "enflasyon": [], "teknoloji": []}
+                    st.session_state[f"{key}_news"] = news
+
+        if news.get("analiz"):
+            st.markdown('<div class="pn-sec"><div class="pn-sec-title">📌 Makro çerçeve</div>', unsafe_allow_html=True)
+            for a in news["analiz"]:
+                st.markdown(f"- {a}")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("#### 🇹🇷 Türkiye")
+            for r in (news.get("turkiye") or [])[:8]:
+                title = r.get("baslik") or ""
+                link = r.get("link") or ""
+                if link:
+                    st.markdown(f"- [{title}]({link})")
+                else:
+                    st.markdown(f"- {title}")
+            st.markdown("#### 📉 Enflasyon / faiz")
+            for r in (news.get("enflasyon") or [])[:8]:
+                title = r.get("baslik") or ""
+                link = r.get("link") or ""
+                if link:
+                    st.markdown(f"- [{title}]({link})")
+                else:
+                    st.markdown(f"- {title}")
+            if not (news.get("enflasyon") or news.get("turkiye")):
+                st.caption("RSS boş — ağ veya kaynak kısıtı. Makro notlara bakın.")
+        with c2:
+            st.markdown("#### 🌐 Dünya")
+            for r in (news.get("dunya") or [])[:8]:
+                title = r.get("baslik") or ""
+                link = r.get("link") or ""
+                if link:
+                    st.markdown(f"- [{title}]({link})")
+                else:
+                    st.markdown(f"- {title}")
+            st.markdown("#### 💻 Teknoloji / yapay zekâ")
+            for r in (news.get("teknoloji") or [])[:8]:
+                title = r.get("baslik") or ""
+                link = r.get("link") or ""
+                if link:
+                    st.markdown(f"- [{title}]({link})")
+                else:
+                    st.markdown(f"- {title}")
+            if not (news.get("dunya") or news.get("teknoloji")):
+                st.caption("Teknoloji/dünya RSS boş olabilir.")
+
+        st.caption(
+            f"Güncelleme: {news.get('guncelleme') or '—'} · Kaynaklar: AA / Bloomberg HT RSS (erişilebilirse)."
+        )
